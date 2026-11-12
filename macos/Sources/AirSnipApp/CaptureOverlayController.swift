@@ -989,7 +989,7 @@ final class OverlayCanvasView: NSView {
             drawMagnifierHUD(in: ctx, at: cursorPoint)
 
             if coordinator?.isDirectOCRCapture == true, cancelConfirmBanner == nil {
-                drawCancelConfirmBanner(in: ctx, message: "OCR 文字识别模式：框选区域或单击窗口即可直接识别文字 · Esc 取消")
+                drawCancelConfirmBanner(in: ctx, message: "框选或点击窗口识字 · Esc 取消")
             }
         }
 
@@ -1358,7 +1358,7 @@ final class OverlayCanvasView: NSView {
                 glyph: .ocr,
                 selected: false,
                 enabled: true,
-                tooltip: "OCR 文字识别\(ocrKey)",
+                tooltip: "识字\(ocrKey)",
                 action: { [weak self] in self?.triggerOCR() }
             ))
         }
@@ -1369,7 +1369,7 @@ final class OverlayCanvasView: NSView {
             glyph: .cancel,
             selected: false,
             enabled: true,
-            tooltip: "取消截图 · Esc",
+            tooltip: "取消 · Esc",
             action: { [weak self] in self?.attemptCancel() }
         ))
 
@@ -1405,7 +1405,7 @@ final class OverlayCanvasView: NSView {
                 glyph: .copy,
                 selected: false,
                 enabled: true,
-                tooltip: "完成复制 · Enter",
+                tooltip: "完成 · Enter",
                 action: { [weak self] in self?.triggerCopyOutput() }
             ))
         }
@@ -1949,7 +1949,7 @@ final class OverlayCanvasView: NSView {
             break
 
         case .blur:
-            let presets: [(Double, CGFloat, String)] = [(8, 2.6, "细颗粒"), (16, 4.1, "标准"), (28, 5.7, "强模糊")]
+            let presets: [(Double, CGFloat, String)] = [(8, 2.6, "轻"), (16, 4.1, "中"), (28, 5.7, "强")]
             let activeBlur: Double = {
                 if let obj = document.selectedObject, case .blur(_, _, let br, _) = obj.kind { return br }
                 return currentBlurRadius
@@ -1978,7 +1978,7 @@ final class OverlayCanvasView: NSView {
             }
 
         case .stroke(let showFill):
-            let presets: [(Double, CGFloat, String)] = [(2, 2.0, "细线"), (4, 3.4, "中线"), (8, 5.0, "粗线")]
+            let presets: [(Double, CGFloat, String)] = [(2, 2.0, "细"), (4, 3.4, "中"), (8, 5.0, "粗")]
             let activeWidth: Double = document.selectedObject?.style.lineWidth ?? currentLineWidth
             for (idx, preset) in presets.enumerated() {
                 let itemID = "stroke.preset.\(idx)"
@@ -2042,7 +2042,7 @@ final class OverlayCanvasView: NSView {
                 toolbarHitItems.append(ToolbarHitItem(
                     id: "edit.fill",
                     rect: fRect,
-                    tooltip: isFilledNow ? "实心填充（已开启）" : "实心填充（点击开启）",
+                    tooltip: "填充",
                     action: { [weak self] in self?.toggleFill() },
                     doubleClickAction: nil
                 ))
@@ -2111,7 +2111,7 @@ final class OverlayCanvasView: NSView {
             toolbarHitItems.append(ToolbarHitItem(
                 id: "text.family",
                 rect: fontBtnRect,
-                tooltip: "切换字体",
+                tooltip: "字体",
                 action: { [weak self] in self?.popFontMenu(from: fontBtnRect) },
                 doubleClickAction: nil
             ))
@@ -2269,7 +2269,7 @@ final class OverlayCanvasView: NSView {
             toolbarHitItems.append(ToolbarHitItem(
                 id: itemID,
                 rect: itemRect,
-                tooltip: "单击选色 · 双击自定义取色",
+                tooltip: "双击自定义颜色",
                 action: { [weak self] in self?.selectColorSwatch(idx) },
                 doubleClickAction: { [weak self] in self?.openColorPicker(for: idx, anchorRect: itemRect) }
             ))
@@ -2427,7 +2427,7 @@ final class OverlayCanvasView: NSView {
             at: NSPoint(x: svRect.minX + 18, y: hexY),
             withAttributes: [.font: hexFont, .foregroundColor: primaryText]
         )
-        let tipStr: NSString = "预设色板"
+        let tipStr: NSString = "预设"
         let tipAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 9.5, weight: .regular), .foregroundColor: secondaryText]
         let tipSz = tipStr.size(withAttributes: tipAttrs)
         tipStr.draw(at: NSPoint(x: svRect.maxX - tipSz.width, y: hexY + 1), withAttributes: tipAttrs)
@@ -2604,7 +2604,7 @@ final class OverlayCanvasView: NSView {
                     tooltipTask = Task { @MainActor [weak self] in
                         try? await Task.sleep(nanoseconds: 400_000_000)
                         guard !Task.isCancelled else { return }
-                        self?.activeTooltip = ("拖动调整圆角", anchor)
+                        self?.activeTooltip = ("圆角", anchor)
                         self?.needsDisplay = true
                     }
                 }
@@ -3231,7 +3231,7 @@ final class OverlayCanvasView: NSView {
             let col = snapshot.rawBuffer.pixel(x: pxX, y: pxY)
             let copied = shift ? col.rgbString : col.hexString
             OutputService.copyStringToClipboard(copied)
-            ToastHUD.show("已复制色值 \(copied)")
+            ToastHUD.show("已复制 \(copied)")
             coordinator?.cancelSession()
             return
         }
@@ -3653,7 +3653,7 @@ final class OverlayCanvasView: NSView {
         activeTool = nil
         document.clearAll()
         colorPicker = nil
-        ToastHUD.show("已再次冻结当前画面，请重新框选")
+        ToastHUD.show("已重新抓屏")
         needsDisplay = true
     }
 
@@ -3717,7 +3717,7 @@ final class OverlayCanvasView: NSView {
 
     private func triggerLongshot() {
         guard let sel = selection, sel.width >= 24 && sel.height >= 24 else {
-            ToastHUD.show("请先框选至少 24×24 的滚动区域")
+            ToastHUD.show("选区过小")
             return
         }
         let pxRect = PixelRect(
@@ -3738,7 +3738,7 @@ final class OverlayCanvasView: NSView {
                 return
             }
             lastCancelAttemptTime = now
-            cancelConfirmBanner = "已有未保存标注，再按一次 Esc 确认放弃"
+            cancelConfirmBanner = "再按一次 Esc 退出"
             needsDisplay = true
             cancelBannerTask?.cancel()
             cancelBannerTask = Task { @MainActor [weak self] in

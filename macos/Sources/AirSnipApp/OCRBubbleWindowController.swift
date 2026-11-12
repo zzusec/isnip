@@ -109,7 +109,7 @@ public final class OCRBubbleManager: ObservableObject {
                 self.paragraphRecognizedText = result.paragraphText
 
                 if result.isEmpty {
-                    self.errorMessage = "未在图像中识别到文字或二维码"
+                    self.errorMessage = "未识别到文字"
                 } else {
                     let chosen: String
                     if result.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -156,7 +156,7 @@ public final class OCRBubbleManager: ObservableObject {
 
     public func copyBarcode(_ payload: String) {
         OutputService.copyStringToClipboard(payload)
-        ToastHUD.show("已复制二维码/条码内容")
+        ToastHUD.show("已复制")
     }
 
     private func triggerCopiedFeedback() {
@@ -253,7 +253,7 @@ private struct OCRBubbleCardView: View {
                 Image(systemName: "text.viewfinder")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
-                Text("OCR 文字识别")
+                Text("文字识别")
                     .font(.system(size: 13, weight: .semibold))
 
                 if let cg = manager.sourceImage {
@@ -274,8 +274,8 @@ private struct OCRBubbleCardView: View {
                 }
                 .labelsHidden()
                 .controlSize(.small)
-                .frame(width: 96)
-                .help("切换识别语言并立即重新识别")
+                .frame(width: 84)
+                .help("识别语言")
 
                 Button {
                     manager.isPinnedOnTop.toggle()
@@ -290,7 +290,7 @@ private struct OCRBubbleCardView: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .help(manager.isPinnedOnTop ? "已置顶（点击取消置顶）" : "置顶窗口")
+                .help(manager.isPinnedOnTop ? "取消置顶" : "置顶")
 
                 Button {
                     manager.dismiss()
@@ -318,7 +318,7 @@ private struct OCRBubbleCardView: View {
                                 .truncationMode(.middle)
                             Spacer(minLength: 4)
                             if let url = webURL(from: code) {
-                                Button("打开链接") {
+                                Button("打开") {
                                     NSWorkspace.shared.open(url)
                                 }
                                 .controlSize(.mini)
@@ -341,7 +341,7 @@ private struct OCRBubbleCardView: View {
                     VStack(spacing: 8) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("正在本地离线识别（图像不出本机）…")
+                        Text("识别中…")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                     }
@@ -354,7 +354,7 @@ private struct OCRBubbleCardView: View {
                         Text(err)
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
-                        Button("重新识别") {
+                        Button("重试") {
                             manager.rerunRecognitionIfPossible()
                         }
                         .controlSize(.small)
@@ -388,7 +388,7 @@ private struct OCRBubbleCardView: View {
                     HStack(spacing: 5) {
                         Image(systemName: manager.copiedFeedback ? "checkmark" : "doc.on.doc")
                             .font(.system(size: 11, weight: .semibold))
-                        Text(manager.copiedFeedback ? "已复制" : "复制全文")
+                        Text(manager.copiedFeedback ? "已复制" : "复制")
                             .font(.system(size: 12, weight: .medium))
                     }
                     .padding(.horizontal, 12)
@@ -415,7 +415,7 @@ private struct OCRBubbleCardView: View {
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
                     .font(.system(size: 12))
-                    .help("自动合并段落内的软换行，保留空行与列表项")
+                    .help("合并段落内换行")
 
                 Toggle("自动复制", isOn: $manager.autoCopy)
                     .toggleStyle(.switch)

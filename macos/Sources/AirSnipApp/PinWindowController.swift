@@ -22,7 +22,7 @@ public final class PinManager: ObservableObject {
         config: AirSnipConfig
     ) {
         if windows.count >= config.pinMaxCount {
-            ToastHUD.show("已达贴图上限（最多 \(config.pinMaxCount) 张）")
+            ToastHUD.show("已达上限（\(config.pinMaxCount) 张）")
             return
         }
         let pointW = max(32.0, Double(cgImage.width) / max(1.0, backingScale))
@@ -71,7 +71,7 @@ public final class PinManager: ObservableObject {
         for w in windows where w.isClickThrough {
             w.setClickThrough(false)
         }
-        ToastHUD.show("已恢复全部贴图的鼠标交互")
+        ToastHUD.show("已恢复贴图交互")
     }
 
     public func toggleAllBorders() {
@@ -80,7 +80,7 @@ public final class PinManager: ObservableObject {
             w.setShowBorder(target)
         }
         updateConfig? { $0.pinBorder = target }
-        ToastHUD.show(target ? "已开启贴图边框" : "已隐藏贴图边框")
+        ToastHUD.show(target ? "边框已开启" : "边框已隐藏")
     }
 }
 
@@ -173,7 +173,7 @@ public final class PinWindowController: NSObject {
         window.ignoresMouseEvents = on
         window.alphaValue = on ? min(opacity, 0.82) : opacity
         if on {
-            ToastHUD.show("贴图已开启鼠标穿透（可在菜单栏恢复）")
+            ToastHUD.show("已开启穿透（菜单栏可恢复）")
         }
     }
 
@@ -229,9 +229,9 @@ public final class PinWindowController: NSObject {
         let cfg = manager?.getConfig?()
         OutputService.copyImageToClipboard(cgImage, backingScale: backingScale, config: cfg) { res in
             if res.savedRatioPercent >= 3 {
-                ToastHUD.show("已复制贴图 · \(res.compactBadgeSummary)")
+                ToastHUD.show("已复制 · \(res.compactBadgeSummary)")
             } else {
-                ToastHUD.show("已复制贴图")
+                ToastHUD.show("已复制")
             }
         }
     }
@@ -239,19 +239,19 @@ public final class PinWindowController: NSObject {
     public func saveAs() {
         guard var cfg = manager?.getConfig?() else { return }
         let showToast = cfg.showCompletionToast
-        if let savedURL = OutputService.presentSaveDialog(
+        if OutputService.presentSaveDialog(
             for: cgImage,
             config: &cfg,
             parentWindow: window,
-            onFinalCompressed: { url, finalRes in
+            onFinalCompressed: { _, finalRes in
                 guard showToast else { return }
-                ToastHUD.show("已保存 \(url.lastPathComponent) · \(finalRes.formattedSummary)")
+                ToastHUD.show("已保存 · \(finalRes.compactBadgeSummary)")
             }
-        ) {
+        ) != nil {
             let finalCfg = cfg
             manager?.updateConfig? { $0 = finalCfg }
             if !(finalCfg.lastSaveFormat == .png && finalCfg.smartPngCompression) {
-                ToastHUD.show("已保存 \(savedURL.lastPathComponent)")
+                ToastHUD.show("已保存")
             }
         }
     }
@@ -408,15 +408,15 @@ private final class PinCanvasView: NSView {
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let owner else { return nil }
         let menu = NSMenu(title: "贴图")
-        let editItem = NSMenuItem(title: "编辑标注 (Space)", action: #selector(onEdit), keyEquivalent: "")
+        let editItem = NSMenuItem(title: "标注 (Space)", action: #selector(onEdit), keyEquivalent: "")
         editItem.target = self
         menu.addItem(editItem)
 
-        let ocrItem = NSMenuItem(title: "识别贴图文字 (T)", action: #selector(onOCR), keyEquivalent: "")
+        let ocrItem = NSMenuItem(title: "识字 (T)", action: #selector(onOCR), keyEquivalent: "")
         ocrItem.target = self
         menu.addItem(ocrItem)
 
-        let copyItem = NSMenuItem(title: "复制图片", action: #selector(onCopy), keyEquivalent: "c")
+        let copyItem = NSMenuItem(title: "复制", action: #selector(onCopy), keyEquivalent: "c")
         copyItem.target = self
         menu.addItem(copyItem)
 
@@ -430,21 +430,21 @@ private final class PinCanvasView: NSView {
         borderItem.target = self
         menu.addItem(borderItem)
 
-        let throughItem = NSMenuItem(title: "鼠标点击穿透", action: #selector(onClickThrough), keyEquivalent: "")
+        let throughItem = NSMenuItem(title: "鼠标穿透", action: #selector(onClickThrough), keyEquivalent: "")
         throughItem.target = self
         menu.addItem(throughItem)
 
-        let resetItem = NSMenuItem(title: "重置为 100% 大小与不透明", action: #selector(onReset), keyEquivalent: "")
+        let resetItem = NSMenuItem(title: "重置大小与透明度", action: #selector(onReset), keyEquivalent: "")
         resetItem.target = self
         menu.addItem(resetItem)
 
         menu.addItem(.separator())
 
-        let closeItem = NSMenuItem(title: "关闭贴图 (Esc)", action: #selector(onClose), keyEquivalent: "")
+        let closeItem = NSMenuItem(title: "关闭 (Esc)", action: #selector(onClose), keyEquivalent: "")
         closeItem.target = self
         menu.addItem(closeItem)
 
-        let closeAllItem = NSMenuItem(title: "关闭全部贴图", action: #selector(onCloseAll), keyEquivalent: "")
+        let closeAllItem = NSMenuItem(title: "关闭全部", action: #selector(onCloseAll), keyEquivalent: "")
         closeAllItem.target = self
         menu.addItem(closeAllItem)
         return menu

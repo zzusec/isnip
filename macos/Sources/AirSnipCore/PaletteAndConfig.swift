@@ -23,9 +23,9 @@ public enum AnnotationTool: Int, Codable, CaseIterable, Sendable {
         case .arrow: return "箭头"
         case .text: return "文本"
         case .highlight: return "荧光笔"
-        case .blur: return "高斯模糊"
+        case .blur: return "模糊"
         case .glow: return "聚光灯"
-        case .number: return "序号标记"
+        case .number: return "序号"
         case .line: return "直线"
         case .ellipse: return "椭圆"
         case .freehand: return "手绘"
@@ -548,8 +548,8 @@ public enum PinPosition: String, Codable, CaseIterable, Sendable {
 
     public var title: String {
         switch self {
-        case .original: return "截图原位置"
-        case .center: return "屏幕中央"
+        case .original: return "原位置"
+        case .center: return "屏幕居中"
         }
     }
 }
@@ -561,9 +561,9 @@ public enum NameStyle: String, Codable, CaseIterable, Sendable {
 
     public var title: String {
         switch self {
-        case .datetime: return "日期 + 时间（isnip-20261112-093000）"
-        case .timestamp: return "时间戳（Unix 毫秒）"
-        case .date: return "仅日期（isnip-20261112）"
+        case .datetime: return "日期时间"
+        case .timestamp: return "时间戳"
+        case .date: return "仅日期"
         }
     }
 
@@ -594,17 +594,17 @@ public enum PngCompressionQualityPreset: String, Codable, CaseIterable, Sendable
 
     public var title: String {
         switch self {
-        case .visuallyLossless: return "视觉无损（默认，推荐）"
-        case .balanced: return "均衡高压缩（--quality 65-90）"
-        case .compact: return "极限小体积（--quality 45-75）"
+        case .visuallyLossless: return "视觉无损（默认）"
+        case .balanced: return "均衡（65–90）"
+        case .compact: return "高压缩（45–75）"
         }
     }
 
     public var shortTitle: String {
         switch self {
         case .visuallyLossless: return "视觉无损"
-        case .balanced: return "均衡 (65-90)"
-        case .compact: return "极限 (45-75)"
+        case .balanced: return "均衡 65–90"
+        case .compact: return "高压缩 45–75"
         }
     }
 
@@ -672,18 +672,18 @@ public struct OcrConfig: Codable, Equatable, Sendable {
     }
 
     public static let supportedOptions: [(tag: String, label: String)] = [
-        ("auto", "跟随系统（中英混合优先）"),
-        ("zh-Hans", "简体中文 + 英文"),
-        ("zh-Hant", "繁体中文 + 英文"),
-        ("en-US", "英文 (English)"),
-        ("ja-JP", "日文 (日本語)"),
-        ("ko-KR", "韩文 (한국어)"),
+        ("auto", "自动"),
+        ("zh-Hans", "简体中文"),
+        ("zh-Hant", "繁体中文"),
+        ("en-US", "English"),
+        ("ja-JP", "日本語"),
+        ("ko-KR", "한국어"),
     ]
 
     public static let compactOptions: [(tag: String, shortLabel: String)] = [
-        ("auto", "自动识别"),
-        ("zh-Hans", "简中+英"),
-        ("zh-Hant", "繁中+英"),
+        ("auto", "自动"),
+        ("zh-Hans", "简中"),
+        ("zh-Hant", "繁中"),
         ("en-US", "English"),
         ("ja-JP", "日本語"),
         ("ko-KR", "한국어"),
@@ -875,10 +875,10 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public func hotkeyConflicts() -> [String] {
         var conflicts: [String] = []
         let globalList: [(String, HotkeyBinding)] = [
-            ("全局截图", hotkeys.screenshot),
-            ("全局截图 OCR", hotkeys.ocrCapture),
-            ("全局贴图", hotkeys.pin),
-            ("贴图边框切换", hotkeys.pinBorderToggle),
+            ("截图", hotkeys.screenshot),
+            ("截图识字", hotkeys.ocrCapture),
+            ("贴图", hotkeys.pin),
+            ("贴图边框", hotkeys.pinBorderToggle),
         ]
         for i in 0..<globalList.count {
             for j in (i + 1)..<globalList.count {
@@ -889,12 +889,12 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         }
 
         var overlayList: [(String, HotkeyBinding)] = [
-            ("再次截图", hotkeys.recapture),
+            ("重新抓屏", hotkeys.recapture),
             ("长截图", hotkeys.longshot),
-            ("OCR 识别", hotkeys.ocr),
+            ("OCR", hotkeys.ocr),
         ]
         for tool in AnnotationTool.allOrdered {
-            overlayList.append(("工具·\(tool.shortLabel)", toolKeys.binding(for: tool)))
+            overlayList.append((tool.shortLabel, toolKeys.binding(for: tool)))
         }
         for i in 0..<overlayList.count {
             for j in (i + 1)..<overlayList.count {

@@ -19,7 +19,7 @@ public final class LongshotSessionController: ObservableObject {
     @Published public private(set) var pixelHeight: Int = 0
     @Published public private(set) var segmentCount: Int = 0
     @Published public private(set) var canUndo: Bool = false
-    @Published public private(set) var statusHint: String = "请在蓝色选框内上下滚动页面，按 Enter 完成"
+    @Published public private(set) var statusHint: String = "在选框内滚动拼接 · Enter 完成"
     @Published public private(set) var thumbnailImage: CGImage?
     @Published public private(set) var headerFooterHint: String?
 
@@ -244,22 +244,21 @@ public final class LongshotSessionController: ObservableObject {
         guard let canvas else { return }
         let step = canvas.push(frame)
         switch step {
-        case .appended(let offset, _):
+        case .appended:
             pixelHeight = canvas.totalHeight
             segmentCount = canvas.segmentCount
             canUndo = canvas.canUndo
-            let dir = offset > 0 ? "向下" : "向上"
-            statusHint = "正在\(dir)拼接（共 \(segmentCount) 段），按 Enter 完成"
+            statusHint = "已拼接 \(segmentCount) 段 · Enter 完成"
             if canvas.headerHeight > 0 || canvas.footerHeight > 0 {
-                headerFooterHint = "已自动过滤固定页眉/页脚"
+                headerFooterHint = "已去页眉页脚"
             }
             thumbnailImage = canvas.makeThumbnail(maxWidth: 160, maxHeight: 420)
         case .still:
             break
         case .failed:
-            statusHint = "滚动过快或含动态内容，请缓慢滚动（可 ⌘Z 撤销最后一段）"
+            statusHint = "滚动过快，请慢速滚动（⌘Z 撤销）"
         case .limitReached:
-            statusHint = "已达长截图高度上限（\(config.longshotMaxHeight) px），请按 Enter 完成"
+            statusHint = "已达高度上限 · Enter 完成"
         }
     }
 
@@ -269,7 +268,7 @@ public final class LongshotSessionController: ObservableObject {
         segmentCount = canvas.segmentCount
         canUndo = canvas.canUndo
         thumbnailImage = canvas.makeThumbnail(maxWidth: 160, maxHeight: 420)
-        statusHint = "已撤销最后一段，可继续滚动或按 Enter 完成"
+        statusHint = "已撤销上一段"
     }
 
     public func finishAndCopy() {
@@ -354,7 +353,7 @@ private struct LongshotPreviewCard: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            Text("实时拼接预览")
+            Text("预览")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
 
@@ -424,35 +423,35 @@ private struct LongshotControlBarView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(!controller.canUndo)
-            .help("撤销最后一段 (⌘Z)")
+            .help("撤销 (⌘Z)")
 
             Button("OCR") {
                 controller.finishAndOCR()
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .help("完成拼接并直接识别长图文字 (T)")
+            .help("识字 (T)")
 
             Button("标注") {
                 controller.finishAndAnnotate()
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .help("完成拼接并进入标注编辑")
+            .help("标注")
 
             Button("保存") {
                 controller.finishAndSave()
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .help("另存为 PNG / JPEG / WebP (⌘S)")
+            .help("保存 (⌘S)")
 
             Button("完成") {
                 controller.finishAndCopy()
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            .help("复制到剪贴板并结束 (Enter)")
+            .help("完成 (Enter)")
 
             Button {
                 controller.cancel()
@@ -462,7 +461,7 @@ private struct LongshotControlBarView: View {
             }
             .buttonStyle(.plain)
             .padding(.horizontal, 4)
-            .help("取消长截图 (Esc)")
+            .help("取消 (Esc)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)

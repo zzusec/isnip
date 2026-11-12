@@ -78,18 +78,16 @@ public enum ScreenCaptureService {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "「屏幕录制」权限尚未生效"
+        alert.messageText = "需要「屏幕录制」权限"
         alert.informativeText = """
-        iSnip 抓屏被系统拦截（所有图像仅在本机内存中处理，绝不联网上传）：
-
-        1. 若您刚在「系统设置 → 录屏与系统录音」中开启了开关：请点击「重启 iSnip 以生效」。
-        2. 若系统设置里的 iSnip 开关原本就是开启状态仍提示此窗口：这是因为旧版本签名记录残留导致系统校验失效，请点击「重置权限记录并重新授权」一键修复。
-        3. 若尚未开启权限：请点击「打开系统设置」开启 iSnip。
+        请在「系统设置 → 录屏与系统录音」中开启 iSnip：
+        • 刚开启开关：点「重启应用」生效
+        • 已开启仍提示：点「重置权限」修复旧授权记录
         """
-        alert.addButton(withTitle: "重启 iSnip 以生效")
-        alert.addButton(withTitle: "重置权限记录并重新授权")
+        alert.addButton(withTitle: "重启应用")
+        alert.addButton(withTitle: "重置权限")
         alert.addButton(withTitle: "打开系统设置")
-        alert.addButton(withTitle: "稍后")
+        alert.addButton(withTitle: "取消")
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
@@ -350,7 +348,7 @@ public enum OutputService {
     public static func readImageFromFileDialog() -> CGImage? {
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
-        panel.title = "选择要识别文字的图片"
+        panel.title = "选择图片"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
@@ -370,7 +368,7 @@ public enum OutputService {
                 return cg
             }
         }
-        ToastHUD.show("无法读取该图片文件", symbol: "exclamationmark.triangle.fill", tint: .systemOrange)
+        ToastHUD.show("无法读取图片", symbol: "exclamationmark.triangle.fill", tint: .systemOrange)
         return nil
     }
 
@@ -383,7 +381,7 @@ public enum OutputService {
         let _ = parentWindow
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSSavePanel()
-        panel.title = "保存截图 — iSnip"
+        panel.title = "保存截图"
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
 
@@ -404,15 +402,14 @@ public enum OutputService {
             panel.directoryURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
         }
 
-        // Refined two-row Save Panel Accessory Bar (Format + PNG Smart Lossless Compression switch & quality preset)
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 452, height: 74))
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 344, height: 70))
 
-        let fmtLabel = NSTextField(labelWithString: "图像格式：")
+        let fmtLabel = NSTextField(labelWithString: "格式：")
         fmtLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
         fmtLabel.alignment = .right
-        fmtLabel.frame = NSRect(x: 12, y: 42, width: 76, height: 20)
+        fmtLabel.frame = NSRect(x: 12, y: 40, width: 68, height: 20)
 
-        let fmtPopup = NSPopUpButton(frame: NSRect(x: 94, y: 38, width: 176, height: 28), pullsDown: false)
+        let fmtPopup = NSPopUpButton(frame: NSRect(x: 84, y: 36, width: 124, height: 28), pullsDown: false)
         for fmt in ExportImageFormat.allCases {
             fmtPopup.addItem(withTitle: fmt.displayName)
         }
@@ -423,17 +420,12 @@ public enum OutputService {
         let compLabel = NSTextField(labelWithString: "无损压缩：")
         compLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
         compLabel.alignment = .right
-        compLabel.frame = NSRect(x: 12, y: 10, width: 76, height: 20)
+        compLabel.frame = NSRect(x: 12, y: 10, width: 68, height: 20)
 
-        let compSwitch = NSSwitch(frame: NSRect(x: 96, y: 8, width: 42, height: 24))
+        let compSwitch = NSSwitch(frame: NSRect(x: 86, y: 8, width: 42, height: 24))
         compSwitch.state = chosenSmartCompress ? .on : .off
 
-        let compHint = NSTextField(labelWithString: "pngquant + oxipng")
-        compHint.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
-        compHint.textColor = .secondaryLabelColor
-        compHint.frame = NSRect(x: 144, y: 10, width: 128, height: 18)
-
-        let qualityPopup = NSPopUpButton(frame: NSRect(x: 278, y: 6, width: 160, height: 28), pullsDown: false)
+        let qualityPopup = NSPopUpButton(frame: NSRect(x: 138, y: 6, width: 148, height: 28), pullsDown: false)
         for q in PngCompressionQualityPreset.allCases {
             qualityPopup.addItem(withTitle: q.shortTitle)
         }
@@ -445,7 +437,6 @@ public enum OutputService {
             let isPng = (chosenFormat == .png)
             compSwitch.isEnabled = isPng
             compLabel.alphaValue = isPng ? 1.0 : 0.45
-            compHint.alphaValue = (isPng && chosenSmartCompress) ? 1.0 : 0.42
             qualityPopup.isEnabled = isPng && chosenSmartCompress
         }
         syncAccessoryStates()
@@ -521,7 +512,6 @@ public enum OutputService {
         accessory.addSubview(fmtPopup)
         accessory.addSubview(compLabel)
         accessory.addSubview(compSwitch)
-        accessory.addSubview(compHint)
         accessory.addSubview(qualityPopup)
         panel.accessoryView = accessory
 
@@ -575,7 +565,7 @@ public enum OutputService {
         } catch {
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = "保存图片失败"
+            alert.messageText = "保存失败"
             alert.informativeText = error.localizedDescription
             alert.runModal()
             return nil
@@ -639,9 +629,9 @@ public final class GlobalHotkeyManager {
 
         let items: [(Action, String, HotkeyBinding)] = [
             (.screenshot, "截图", hotkeys.screenshot),
-            (.ocrCapture, "截图 OCR 识别", hotkeys.ocrCapture),
+            (.ocrCapture, "截图识字", hotkeys.ocrCapture),
             (.pin, "贴图", hotkeys.pin),
-            (.pinBorderToggle, "贴图边框开关", hotkeys.pinBorderToggle),
+            (.pinBorderToggle, "贴图边框", hotkeys.pinBorderToggle),
         ]
 
         let signature = OSType(0x4153_4E50) // 'ASNP'
@@ -665,7 +655,7 @@ public final class GlobalHotkeyManager {
             if status == noErr, let ref {
                 hotKeyRefs.append(ref)
             } else {
-                failures.append("\(title)（\(binding.displayString)）已被系统或其他应用占用")
+                failures.append("\(title)（\(binding.displayString)）已被占用")
             }
         }
 

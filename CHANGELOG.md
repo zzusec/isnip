@@ -1,5 +1,9 @@
 # Changelog
 
+## macOS v0.3.2
+
+- 全面精简全软件界面文案（遵循 Apple 原生简洁设计规范）：移除设置页冗余长副标题、侧边栏标语与关于页广告式卡片，统一收敛菜单栏、设置项、快捷键列表、保存面板、OCR 窗口、长截图提示、贴图菜单及顶部胶囊轻提示文案。
+
 ## macOS v0.3.1
 
 - 修复本机安装脚本 `install-local.sh` 在退出旧版驻留进程时因 `/bin/sh` 变量紧邻全角符号（`$bin_name…`）触发的 `unbound variable` 报错，并在 `test-release-policy.py` 中补充所有 Shell 脚本语法与变量边界回归校验，确保旧版 `/Applications/AirSnip.app` 自动平滑退役并切换至 `/Applications/iSnip.app`。

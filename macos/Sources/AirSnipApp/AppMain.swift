@@ -87,7 +87,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 guard let self else { return }
                 if case .success(let rel?) = await UpdateChecker.checkLatest(),
                    self.config.skippedVersion != rel.version {
-                    ToastHUD.show("发现新版本 iSnip v\(rel.version)，可在「设置 → 关于」更新", symbol: "arrow.down.circle.fill", tint: .systemCyan, duration: 3.0)
+                    ToastHUD.show("发现新版本 v\(rel.version)", symbol: "arrow.down.circle.fill", tint: .systemCyan, duration: 3.0)
                 }
             }
         }
@@ -128,7 +128,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
             button.image = makeMenuBarTemplateIcon()
-            button.toolTip = "iSnip — 点击打开菜单"
+            button.toolTip = "iSnip"
         }
         statusMenu.delegate = self
         populateStatusMenu(statusMenu)
@@ -156,25 +156,25 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         menu.addItem(capItem)
 
         let ocrCapHint = config.hotkeys.ocrCapture.isUnbound ? "" : " (\(config.hotkeys.ocrCapture.displayString))"
-        let ocrCapItem = NSMenuItem(title: "截图文字识别\(ocrCapHint)", action: #selector(menuDirectOCRCapture), keyEquivalent: "")
+        let ocrCapItem = NSMenuItem(title: "截图识字\(ocrCapHint)", action: #selector(menuDirectOCRCapture), keyEquivalent: "")
         ocrCapItem.image = menuIcon("text.viewfinder")
         ocrCapItem.target = self
         menu.addItem(ocrCapItem)
 
         let pinHint = config.hotkeys.pin.isUnbound ? "" : " (\(config.hotkeys.pin.displayString))"
-        let pinItem = NSMenuItem(title: "从剪贴板贴图\(pinHint)", action: #selector(menuPinClipboard), keyEquivalent: "")
+        let pinItem = NSMenuItem(title: "剪贴板贴图\(pinHint)", action: #selector(menuPinClipboard), keyEquivalent: "")
         pinItem.image = menuIcon("pin")
         pinItem.target = self
         menu.addItem(pinItem)
 
         menu.addItem(.separator())
 
-        let ocrClipItem = NSMenuItem(title: "从剪贴板识别文字", action: #selector(menuOCRClipboard), keyEquivalent: "")
+        let ocrClipItem = NSMenuItem(title: "识别剪贴板文字", action: #selector(menuOCRClipboard), keyEquivalent: "")
         ocrClipItem.image = menuIcon("doc.text.viewfinder")
         ocrClipItem.target = self
         menu.addItem(ocrClipItem)
 
-        let ocrFileItem = NSMenuItem(title: "从图片文件识别文字…", action: #selector(menuOCRFile), keyEquivalent: "")
+        let ocrFileItem = NSMenuItem(title: "识别图片文字…", action: #selector(menuOCRFile), keyEquivalent: "")
         ocrFileItem.image = menuIcon("photo.badge.magnifyingglass")
         ocrFileItem.target = self
         menu.addItem(ocrFileItem)
@@ -182,12 +182,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         if pinManager.count > 0 {
             menu.addItem(.separator())
             if pinManager.hasClickThroughPins {
-                let restoreItem = NSMenuItem(title: "恢复全部鼠标穿透贴图", action: #selector(menuRestoreClickThrough), keyEquivalent: "")
+                let restoreItem = NSMenuItem(title: "取消贴图穿透", action: #selector(menuRestoreClickThrough), keyEquivalent: "")
                 restoreItem.image = menuIcon("cursorarrow.click.2")
                 restoreItem.target = self
                 menu.addItem(restoreItem)
             }
-            let closePins = NSMenuItem(title: "关闭全部贴图（\(pinManager.count)）", action: #selector(menuCloseAllPins), keyEquivalent: "")
+            let closePins = NSMenuItem(title: "关闭全部贴图 (\(pinManager.count))", action: #selector(menuCloseAllPins), keyEquivalent: "")
             closePins.image = menuIcon("xmark.circle")
             closePins.target = self
             menu.addItem(closePins)
@@ -321,7 +321,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     public func triggerOCRFromClipboard() {
         guard let clip = OutputService.readImageFromClipboard() else {
-            ToastHUD.show("剪贴板中当前没有可识别的图片")
+            ToastHUD.show("剪贴板无图片")
             return
         }
         ocrBubbleManager.recognizeAndPresent(
@@ -388,30 +388,28 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: currentCfg) { res in
                 guard showToast else { return }
                 if res.savedRatioPercent >= 3 {
-                    ToastHUD.show("截图已复制 · \(res.compactBadgeSummary)")
+                    ToastHUD.show("已复制 · \(res.compactBadgeSummary)")
                 } else {
-                    ToastHUD.show("截图已复制到剪贴板")
+                    ToastHUD.show("已复制")
                 }
             }
         }
         coordinator.onCompleteSave = { [weak self] cgImg, scale, cfg in
             let _ = scale
             let showToast = cfg.showCompletionToast
-            let wasSmartPng = (cfg.lastSaveFormat == .png)
-            guard let savedURL = OutputService.presentSaveDialog(
+            guard OutputService.presentSaveDialog(
                 for: cgImg,
                 config: &cfg,
-                onFinalCompressed: { url, finalRes in
+                onFinalCompressed: { _, finalRes in
                     guard showToast else { return }
-                    ToastHUD.show("已保存 \(url.lastPathComponent) · \(finalRes.formattedSummary)")
+                    ToastHUD.show("已保存 · \(finalRes.compactBadgeSummary)")
                 }
-            ) else {
+            ) != nil else {
                 return false
             }
             self?.config = cfg
-            let _ = wasSmartPng
             if cfg.showCompletionToast && !(cfg.lastSaveFormat == .png && cfg.smartPngCompression) {
-                ToastHUD.show("已保存 \(savedURL.lastPathComponent)")
+                ToastHUD.show("已保存")
             }
             return true
         }
@@ -456,9 +454,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: currentCfg) { res in
                 guard showToast else { return }
                 if res.savedRatioPercent >= 3 {
-                    ToastHUD.show("长截图已复制 · \(res.compactBadgeSummary)")
+                    ToastHUD.show("已复制 · \(res.compactBadgeSummary)")
                 } else {
-                    ToastHUD.show("长截图已复制（\(cgImg.width)×\(cgImg.height)）")
+                    ToastHUD.show("已复制")
                 }
             }
         }
@@ -468,17 +466,17 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: self.config)
             var cfg = self.config
             let showToast = cfg.showCompletionToast
-            if let url = OutputService.presentSaveDialog(
+            if OutputService.presentSaveDialog(
                 for: cgImg,
                 config: &cfg,
-                onFinalCompressed: { savedURL, finalRes in
+                onFinalCompressed: { _, finalRes in
                     guard showToast else { return }
-                    ToastHUD.show("已保存 \(savedURL.lastPathComponent) · \(finalRes.formattedSummary)")
+                    ToastHUD.show("已保存 · \(finalRes.compactBadgeSummary)")
                 }
-            ) {
+            ) != nil {
                 self.config = cfg
                 if self.config.showCompletionToast && !(cfg.lastSaveFormat == .png && cfg.smartPngCompression) {
-                    ToastHUD.show("已保存 \(url.lastPathComponent)")
+                    ToastHUD.show("已保存")
                 }
             }
         }

@@ -18,9 +18,9 @@ public enum ExportImageFormat: String, Codable, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .png: return "PNG（无损）"
+        case .png: return "PNG"
         case .jpeg: return "JPEG"
-        case .webp: return "WebP（无损）"
+        case .webp: return "WebP"
         }
     }
 }
@@ -286,13 +286,13 @@ public enum ImageEncodingError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .invalidImage:
-            return "无效的图像数据"
+            return "无效图像数据"
         case .destinationCreationFailed:
-            return "无法创建图像编码目标"
+            return "无法创建编码器"
         case .finalizeFailed:
-            return "图像编码写入失败"
+            return "写入图像失败"
         case .webpDimensionsExceeded(let w, let h):
-            return "WebP 无损格式单边最大支持 16384 像素（当前 \(w)×\(h)），请改存为 PNG 格式"
+            return "WebP 单边上限 16384 px（当前 \(w)×\(h)），请改存 PNG"
         }
     }
 }

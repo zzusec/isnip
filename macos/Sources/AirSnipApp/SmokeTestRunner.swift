@@ -279,14 +279,17 @@ public enum SmokeTestRunner {
                     try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
                     let dummyApp = AirSnipAppController()
                     let tabsToDump: [(SettingsTab, String)] = [
-                        (.general, "06_settings_general.png"),
-                        (.captureAndPin, "07_settings_compression.png"),
-                        (.editor, "08_settings_editor.png"),
-                        (.about, "09_settings_about.png"),
+                        (.general, "01_general.png"),
+                        (.captureAndPin, "02_capture.png"),
+                        (.toolbar, "03_toolbar.png"),
+                        (.hotkeys, "04_hotkeys.png"),
+                        (.editor, "05_editor.png"),
+                        (.ocr, "06_ocr.png"),
+                        (.about, "07_about.png"),
                     ]
                     for (tab, fileName) in tabsToDump {
                         let host = NSHostingView(rootView: SettingsRootView(app: dummyApp, initialTab: tab))
-                        host.frame = NSRect(x: 0, y: 0, width: 760, height: 540)
+                        host.frame = NSRect(x: 0, y: 0, width: 720, height: 520)
                         host.appearance = NSAppearance(named: .aqua)
                         host.layoutSubtreeIfNeeded()
                         if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
