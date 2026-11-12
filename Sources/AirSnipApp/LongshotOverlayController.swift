@@ -50,6 +50,7 @@ public final class LongshotSessionController: ObservableObject {
 
     private var pendingInitialDelayMs: UInt64 = 0
     private var pendingInitialWarp: Bool = false
+    private var pendingSettleRecapture: Bool = false
     private var consecutiveStillCount: Int = 0
     private var adaptiveScale: Double = 1.0
     private var goodStepStreak: Int = 0
@@ -141,6 +142,7 @@ public final class LongshotSessionController: ObservableObject {
         consecutiveStillCount = 0
         adaptiveScale = 1.0
         goodStepStreak = 0
+        pendingSettleRecapture = false
         pendingInitialDelayMs = initialDelayMs
         pendingInitialWarp = true
         isAutoScrolling = true
@@ -420,10 +422,41 @@ public final class LongshotSessionController: ObservableObject {
                         continue
                     }
 
-                    let probeBoost = (self.consecutiveStillCount == 1) ? 1.25 : 1.0
-                    let fraction = min(0.46, self.scrollSpeed.viewportStepFraction * self.adaptiveScale * probeBoost)
-                    let totalStepPt = max(36, min(280, Int((targetRect.height * fraction).rounded())))
-                    let tickCount = 6
+                    // If the previous 1-screen jump was still painting/settling, re-capture once after 110ms BEFORE scrolling again
+                    // so we never double-jump past `prevFrame` and lose overlap!
+                    if self.pendingSettleRecapture {
+                        self.pendingSettleRecapture = false
+                        try? await Task.sleep(nanoseconds: 110_000_000)
+                        guard !Task.isCancelled, self.isAutoScrolling else { continue }
+                        if let retryFrame = await ScreenCaptureService.captureDisplayRegion(
+                            screen: targetScreen,
+                            localTopDownRect: targetRect,
+                            excludingWindowNumbers: ownWinIDs
+                        ) {
+                            self.handleAutoScrollFrame(retryFrame, screen: targetScreen, viewport: targetRect, wasSettleRetry: true)
+                        }
+                        continue
+                    }
+
+                    // Full-page stepping:
+                    // - Step 0 (`segmentCount == 0`, before fixed header/footer height is measured): scroll ~58% of window height
+                    //   so even tall browser toolbars + sticky site headers leave >=20% clean overlap to lock exact seams.
+                    // - Step 1+ (`segmentCount >= 1`): deduct exact `headerHeight + footerHeight` and advance ~78%–85% of the
+                    //   scrollable body per jump (~1 full screen per step, keeping 15%–22% seam overlap for pixel-exact stitching).
+                    let fixedHeaderFooterPt: Double
+                    if let c = self.canvas, self.segmentCount > 0 {
+                        fixedHeaderFooterPt = Double(c.headerHeight + c.footerHeight) / self.backingScale
+                    } else {
+                        fixedHeaderFooterPt = 0
+                    }
+                    let scrollableBodyPt = max(64.0, targetRect.height - fixedHeaderFooterPt)
+                    let rawFraction = self.scrollSpeed.viewportStepFraction * self.adaptiveScale
+                    let effectiveFraction = (self.segmentCount == 0) ? min(0.58, rawFraction) : min(0.86, rawFraction)
+                    let minSeamOverlapPt = max(48.0, scrollableBodyPt * 0.14)
+                    let maxSafeStepPt = max(36.0, scrollableBodyPt - minSeamOverlapPt)
+                    let totalStepPt = max(36, Int(min(maxSafeStepPt, scrollableBodyPt * effectiveFraction).rounded()))
+
+                    let tickCount = max(3, Int(ceil(Double(totalStepPt) / 220.0)))
                     let baseTick = totalStepPt / tickCount
                     let remTicks = totalStepPt % tickCount
                     let scrollAnchor = AccessibilityService.globalCGPoint(
@@ -441,7 +474,7 @@ public final class LongshotSessionController: ObservableObject {
                             AccessibilityService.postPixelScrollDown(at: scrollAnchor, deltaPointsDown: delta)
                         }
                         if t + 1 < tickCount {
-                            try? await Task.sleep(nanoseconds: 15_000_000)
+                            try? await Task.sleep(nanoseconds: 6_000_000)
                         }
                     }
 
@@ -456,7 +489,7 @@ public final class LongshotSessionController: ObservableObject {
                     ) else {
                         continue
                     }
-                    self.handleAutoScrollFrame(frame, screen: targetScreen, viewport: targetRect)
+                    self.handleAutoScrollFrame(frame, screen: targetScreen, viewport: targetRect, wasSettleRetry: false)
                 } else {
                     try? await Task.sleep(nanoseconds: 115_000_000)
                     guard !Task.isCancelled, !self.isAutoScrolling else { continue }
@@ -473,12 +506,13 @@ public final class LongshotSessionController: ObservableObject {
         }
     }
 
-    private func handleAutoScrollFrame(_ frame: PixelBufferRGBA, screen: NSScreen, viewport: ASRect) {
+    private func handleAutoScrollFrame(_ frame: PixelBufferRGBA, screen: NSScreen, viewport: ASRect, wasSettleRetry: Bool) {
         let step = processFrame(frame, fromAutoScroll: true)
         switch step {
         case .appended:
             consecutiveStillCount = 0
             reachedBottom = false
+            pendingSettleRecapture = false
             goodStepStreak += 1
             if goodStepStreak >= 2 {
                 adaptiveScale = 1.0
@@ -487,6 +521,7 @@ public final class LongshotSessionController: ObservableObject {
 
         case .still:
             consecutiveStillCount += 1
+            pendingSettleRecapture = false
             if segmentCount == 0 && consecutiveStillCount == 1 {
                 AccessibilityService.moveCursorIntoViewportIfNeeded(
                     screen: screen,
@@ -494,7 +529,7 @@ public final class LongshotSessionController: ObservableObject {
                     avoidAppKitRect: controlWindow?.frame
                 )
             }
-            let stopThreshold = segmentCount > 0 ? 2 : 4
+            let stopThreshold = segmentCount > 0 ? 3 : 4
             if consecutiveStillCount >= stopThreshold {
                 isAutoScrolling = false
                 if segmentCount > 0 {
@@ -507,11 +542,17 @@ public final class LongshotSessionController: ObservableObject {
 
         case .failed:
             goodStepStreak = 0
-            adaptiveScale = max(0.45, adaptiveScale * 0.65)
-            statusHint = "正在自适应调速拼接 · Space 暂停"
+            if !wasSettleRetry {
+                pendingSettleRecapture = true
+                statusHint = "等待页面渲染对齐 · Space 暂停"
+            } else {
+                adaptiveScale = max(0.45, adaptiveScale * 0.65)
+                statusHint = "正在自适应调速拼接 · Space 暂停"
+            }
 
         case .limitReached:
             isAutoScrolling = false
+            pendingSettleRecapture = false
             statusHint = "已达高度上限 · Enter 保存"
         }
     }

@@ -734,5 +734,189 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertEqual(refreshedPx.r, doc[expectedDocOffset])
         XCTAssertEqual(refreshedPx.g, doc[expectedDocOffset + 1])
         XCTAssertEqual(refreshedPx.b, doc[expectedDocOffset + 2])
+
+        // 4. Full-page stepping (`~80%-85%` of scrollable screen per jump with fixed top browser bar & bottom bar)
+        XCTAssertGreaterThanOrEqual(LongshotScrollSpeed.normal.viewportStepFraction, 0.75)
+        XCTAssertGreaterThanOrEqual(LongshotScrollSpeed.fast.viewportStepFraction, 0.84)
+
+        let fullW = 200
+        let fullFrameH = 240 // 30px fixed top bar + 190px scrollable body + 20px fixed bottom bar
+        let fullDocH = 900
+        var fullDoc = [UInt8](repeating: 255, count: fullW * fullDocH * 4)
+        for y in 0..<fullDocH {
+            for x in 0..<fullW {
+                let o = (y * fullW + x) * 4
+                fullDoc[o] = UInt8(((y / 5) * 41 + x * 3) & 0xFF)
+                fullDoc[o + 1] = UInt8(((y / 5) * 83 + y * 7) & 0xFF)
+                fullDoc[o + 2] = UInt8(((y / 5) * 29 + (x ^ y)) & 0xFF)
+                fullDoc[o + 3] = 255
+            }
+        }
+        func renderFullPageStep(scrollY: Int) -> PixelBufferRGBA {
+            var rgba = [UInt8](repeating: 255, count: fullW * fullFrameH * 4)
+            for y in 0..<fullFrameH {
+                for x in 0..<fullW {
+                    let dst = (y * fullW + x) * 4
+                    if y < 30 {
+                        rgba[dst] = 35; rgba[dst + 1] = UInt8(60 + x / 2); rgba[dst + 2] = 120; rgba[dst + 3] = 255
+                    } else if y >= 220 {
+                        rgba[dst] = 95; rgba[dst + 1] = 45; rgba[dst + 2] = UInt8(50 + x / 2); rgba[dst + 3] = 255
+                    } else {
+                        let src = ((scrollY + (y - 30)) * fullW + x) * 4
+                        rgba[dst] = fullDoc[src]; rgba[dst + 1] = fullDoc[src + 1]; rgba[dst + 2] = fullDoc[src + 2]; rgba[dst + 3] = 255
+                    }
+                }
+            }
+            return PixelBufferRGBA(width: fullW, height: fullFrameH, rgba: rgba)
+        }
+
+        let pageCanvas = LongshotCanvas(width: fullW, frameHeight: fullFrameH, params: LongshotParams(minRatio: 0.84, minFixedRows: 8))
+        pageCanvas.seed(renderFullPageStep(scrollY: 0))
+        // Step 1: ~75% of body (`142` rows out of `190`), Step 2 & 3: `84%` of body (`160` rows out of `190` — nearly 1 full screen per jump!)
+        XCTAssertEqual(pageCanvas.push(renderFullPageStep(scrollY: 142)), .appended(offset: 142, rows: 142))
+        XCTAssertEqual(pageCanvas.headerHeight, 30)
+        XCTAssertEqual(pageCanvas.footerHeight, 20)
+        XCTAssertEqual(pageCanvas.push(renderFullPageStep(scrollY: 302)), .appended(offset: 160, rows: 160))
+        XCTAssertEqual(pageCanvas.push(renderFullPageStep(scrollY: 462)), .appended(offset: 160, rows: 160))
+        XCTAssertEqual(pageCanvas.totalHeight, 30 + (190 + 142 + 160 + 160) + 20)
+    }
+
+    func testLongshotRealBrowserStickyHeaderSubpixelNoiseSidebarAndNoDuplicateDump() throws {
+        let w = 640
+        let fh = 440
+        let docH = 1400
+        let sidebarW = 120
+
+        // Build realistic forum topic list (`y = 0..<1400`) on white background with dark text rows & divider lines
+        var doc = [UInt8](repeating: 255, count: w * docH * 4)
+        for topicIdx in 0..<(docH / 44) {
+            let baseY = topicIdx * 44
+            // 1px topic divider line
+            let divY = baseY + 43
+            if divY < docH {
+                for x in (sidebarW + 16)..<(w - 28) {
+                    let o = (divY * w + x) * 4
+                    doc[o] = 232; doc[o + 1] = 235; doc[o + 2] = 240; doc[o + 3] = 255
+                }
+            }
+            // Topic title + tag badges (`8` text rows)
+            for ty in 10..<20 {
+                let y = baseY + ty
+                guard y < docH else { continue }
+                let titleEnd = sidebarW + 140 + ((topicIdx * 79) % 260)
+                for x in (sidebarW + 20)..<min(w - 90, titleEnd) {
+                    if ((x * 5 + topicIdx * 13 + ty * 7) % 4) != 0 {
+                        let o = (y * w + x) * 4
+                        doc[o] = UInt8(28 + (topicIdx * 17) % 70)
+                        doc[o + 1] = UInt8(34 + (ty * 9) % 60)
+                        doc[o + 2] = UInt8(45 + (x * 3 + topicIdx * 23) % 90)
+                        doc[o + 3] = 255
+                    }
+                }
+            }
+        }
+
+        func renderBrowserFrame(scrollY: Int, stepIdx: Int) -> PixelBufferRGBA {
+            var rgba = [UInt8](repeating: 255, count: w * fh * 4)
+            for y in 0..<fh {
+                for x in 0..<w {
+                    let dst = (y * w + x) * 4
+                    // Deterministic ±2 RGB subpixel compositor noise crossing `& 0xFC` bucket boundaries (127<->128, 251<->252)
+                    let jitter = ((x * 17 + y * 31 + stepIdx * 13) % 5) - 2
+                    func clamp(_ v: Int) -> UInt8 { UInt8(max(0, min(255, v + jitter))) }
+
+                    if y < 22 {
+                        // Browser tab bar with animated tab favicon/title changing every frame!
+                        rgba[dst] = UInt8((190 + stepIdx * 19 + x / 8) & 0xFF)
+                        rgba[dst + 1] = UInt8((210 + stepIdx * 11) & 0xFF)
+                        rgba[dst + 2] = 248
+                        rgba[dst + 3] = 255
+                    } else if y < 64 {
+                        // Opaque browser URL & bookmarks bar (`127`/`251` values right on old `& 0xFC` hash boundary!)
+                        rgba[dst] = clamp(x % 29 == 0 ? 127 : 237)
+                        rgba[dst + 1] = clamp(242)
+                        rgba[dst + 2] = clamp(251)
+                        rgba[dst + 3] = 255
+                    } else if y < 94 {
+                        // Translucent `backdrop-filter: blur` sticky site header (background tint shifts slightly per step!)
+                        let blurShift = (stepIdx * 3) % 7
+                        if x > 40 && x < 170 && y >= 72 && y < 86 {
+                            rgba[dst] = clamp(32); rgba[dst + 1] = clamp(36); rgba[dst + 2] = clamp(42)
+                        } else {
+                            rgba[dst] = clamp(249 - blurShift)
+                            rgba[dst + 1] = clamp(250 - blurShift / 2)
+                            rgba[dst + 2] = clamp(252)
+                        }
+                        rgba[dst + 3] = 255
+                    } else if y < 96 {
+                        // Crisp 2px bottom border of sticky site header (`headerHeight == 96`)
+                        rgba[dst] = clamp(218); rgba[dst + 1] = clamp(222); rgba[dst + 2] = clamp(228); rgba[dst + 3] = 255
+                    } else {
+                        // Body region (`y = 96..<440`)
+                        if x < sidebarW {
+                            // Fixed left navigation sidebar: clean gap rows + stationary menu items + 1px divider at `sidebarW - 1`
+                            if x == sidebarW - 1 {
+                                rgba[dst] = 228; rgba[dst + 1] = 231; rgba[dst + 2] = 236; rgba[dst + 3] = 255
+                            } else if y >= 112 && y < 136 && x >= 12 && x < sidebarW - 12 {
+                                // Stationary active pill highlight in sidebar
+                                rgba[dst] = 224; rgba[dst + 1] = 238; rgba[dst + 2] = 254; rgba[dst + 3] = 255
+                            } else if (y >= 160 && y < 340) && ((y - 160) % 28 < 8) && x >= 18 && x < sidebarW - 24 && ((x + y) % 3 == 0) {
+                                // Stationary sidebar menu text
+                                rgba[dst] = 60; rgba[dst + 1] = 68; rgba[dst + 2] = 80; rgba[dst + 3] = 255
+                            } else {
+                                rgba[dst] = 255; rgba[dst + 1] = 255; rgba[dst + 2] = 255; rgba[dst + 3] = 255
+                            }
+                        } else {
+                            let srcY = min(docH - 1, scrollY + (y - 96))
+                            let src = (srcY * w + x) * 4
+                            // Animated user avatar changing in a narrow column (`x = 520..<534`)
+                            if x >= 520 && x < 534 && (srcY % 44 >= 12 && srcY % 44 < 24) {
+                                rgba[dst] = UInt8((stepIdx * 53 + x * 7) & 0xFF)
+                                rgba[dst + 1] = UInt8((stepIdx * 97 + y * 3) & 0xFF)
+                                rgba[dst + 2] = 180
+                                rgba[dst + 3] = 255
+                            } else {
+                                rgba[dst] = clamp(Int(doc[src]))
+                                rgba[dst + 1] = clamp(Int(doc[src + 1]))
+                                rgba[dst + 2] = clamp(Int(doc[src + 2]))
+                                rgba[dst + 3] = 255
+                            }
+                        }
+
+                        // Stationary dark wallpaper outside rounded bottom-left & bottom-right window corners (`y >= 418`)
+                        if y >= 418 && (x < 5 || x >= w - 5) {
+                            rgba[dst] = 24; rgba[dst + 1] = 26; rgba[dst + 2] = 32; rgba[dst + 3] = 255
+                        }
+                    }
+                }
+            }
+            return PixelBufferRGBA(width: w, height: fh, rgba: rgba)
+        }
+
+        let canvas = LongshotCanvas(width: w, frameHeight: fh, params: LongshotParams(minRatio: 0.84, minFixedRows: 8), maxHeight: 30000)
+        canvas.seed(renderBrowserFrame(scrollY: 0, stepIdx: 0))
+
+        // Step 1: scroll 210px -> atomically locks exact `headerHeight == 96` and rounded corner cap!
+        XCTAssertEqual(canvas.push(renderBrowserFrame(scrollY: 210, stepIdx: 1)), .appended(offset: 210, rows: 210))
+        XCTAssertEqual(canvas.headerHeight, 96)
+        XCTAssertGreaterThanOrEqual(canvas.footerHeight, 22)
+
+        // 5 consecutive unaligned garbage frames MUST return `.failed` and NEVER stack full browser windows onto the canvas!
+        let heightBeforeGarbage = canvas.totalHeight
+        let garbage = PixelBufferRGBA(width: w, height: fh, rgba: [UInt8](repeating: 80, count: w * fh * 4))
+        for _ in 0..<5 {
+            XCTAssertEqual(canvas.push(garbage), .failed)
+        }
+        XCTAssertEqual(canvas.totalHeight, heightBeforeGarbage)
+
+        // Step 2 & Step 3: ~80% full-screen jumps (`256px` out of `320px` scrollable body!) stitch seamlessly!
+        XCTAssertEqual(canvas.push(renderBrowserFrame(scrollY: 466, stepIdx: 2)), .appended(offset: 256, rows: 256))
+        XCTAssertEqual(canvas.push(renderBrowserFrame(scrollY: 722, stepIdx: 3)), .appended(offset: 256, rows: 256))
+        XCTAssertEqual(canvas.totalHeight, fh + 210 + 256 + 256)
+
+        let out = try XCTUnwrap(canvas.exportBuffer())
+        XCTAssertEqual(out.height, fh + 210 + 256 + 256)
+        // Verify intermediate seam rows (`y = 520`) do NOT have dark `(24,26,32)` rounded-corner notches at `x = 2`!
+        XCTAssertGreaterThan(out.pixel(x: 2, y: 520).r, 200)
     }
 }

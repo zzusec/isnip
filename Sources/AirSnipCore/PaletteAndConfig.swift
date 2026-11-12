@@ -538,17 +538,17 @@ public enum LongshotScrollSpeed: String, Codable, CaseIterable, Sendable {
 
     public var viewportStepFraction: Double {
         switch self {
-        case .slow: return 0.20
-        case .normal: return 0.30
-        case .fast: return 0.40
+        case .slow: return 0.62
+        case .normal: return 0.78
+        case .fast: return 0.85
         }
     }
 
     public var settleMilliseconds: UInt64 {
         switch self {
-        case .slow: return 190
-        case .normal: return 155
-        case .fast: return 130
+        case .slow: return 135
+        case .normal: return 95
+        case .fast: return 75
         }
     }
 
