@@ -61,6 +61,8 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             switch action {
             case .screenshot:
                 self.triggerCapture()
+            case .windowCapture:
+                self.triggerDirectWindowCapture()
             case .longshotCapture:
                 self.triggerDirectLongshotCapture()
             case .ocrCapture:
@@ -159,6 +161,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         capItem.target = self
         menu.addItem(capItem)
 
+        let winCapHint = config.hotkeys.windowCapture.isUnbound ? "" : " (\(config.hotkeys.windowCapture.displayString))"
+        let winCapItem = NSMenuItem(title: "窗体截图\(winCapHint)", action: #selector(menuDirectWindowCapture), keyEquivalent: "")
+        winCapItem.image = menuIcon("macwindow")
+        winCapItem.target = self
+        menu.addItem(winCapItem)
+
         let lsCapHint = config.hotkeys.longshotCapture.isUnbound ? "" : " (\(config.hotkeys.longshotCapture.displayString))"
         let lsCapItem = NSMenuItem(title: "页面长截图\(lsCapHint)", action: #selector(menuDirectLongshotCapture), keyEquivalent: "")
         lsCapItem.image = menuIcon("arrow.up.and.down.text.horizontal")
@@ -218,6 +226,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     @objc private func menuCapture() {
         startScreenCaptureOverlay(mode: .normalCapture, fromMenu: true)
+    }
+    @objc private func menuDirectWindowCapture() {
+        startScreenCaptureOverlay(mode: .directWindowCapture, fromMenu: true)
     }
     @objc private func menuDirectLongshotCapture() {
         startScreenCaptureOverlay(mode: .directLongshotCapture, fromMenu: true)
@@ -287,6 +298,10 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     public func triggerCapture() {
         startScreenCaptureOverlay(mode: .normalCapture)
+    }
+
+    public func triggerDirectWindowCapture() {
+        startScreenCaptureOverlay(mode: .directWindowCapture)
     }
 
     public func triggerDirectLongshotCapture() {

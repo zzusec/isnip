@@ -102,8 +102,15 @@ public enum ScreenCaptureService {
         }
     }
 
-    /// Queries on-screen application windows via CoreGraphics (top-down global coordinates).
-    public static func queryOnScreenWindowsGlobalTopDown(excludingPID: pid_t = ProcessInfo.processInfo.processIdentifier) -> [ASRect] {
+    public struct GlobalWindowDescriptor: Sendable {
+        public let windowID: UInt32
+        public let ownerName: String
+        public let title: String
+        public let globalRectTopDown: ASRect
+    }
+
+    /// Queries on-screen application windows via CoreGraphics (top-down global coordinates, front-to-back Z-order).
+    public static func queryOnScreenWindowsGlobalTopDown(excludingWindowNumbers: Set<Int> = []) -> [GlobalWindowDescriptor] {
         guard let infoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
@@ -111,16 +118,19 @@ public enum ScreenCaptureService {
             "Dock", "程序坞", "Window Server", "WindowManager", "Wallpaper", "墙纸",
             "SystemUIServer", "Control Center", "控制中心", "Notification Center", "通知中心", "Spotlight", "聚焦"
         ]
-        var rects: [ASRect] = []
+        var descriptors: [GlobalWindowDescriptor] = []
         for entry in infoList {
-            if let ownerPID = entry[kCGWindowOwnerPID as String] as? pid_t, ownerPID == excludingPID {
+            let winID = (entry[kCGWindowNumber as String] as? UInt32)
+                ?? UInt32((entry[kCGWindowNumber as String] as? Int) ?? 0)
+            if winID == 0 || excludingWindowNumbers.contains(Int(winID)) {
                 continue
             }
-            if let ownerName = entry[kCGWindowOwnerName as String] as? String, ignoredOwners.contains(ownerName) {
+            let ownerName = (entry[kCGWindowOwnerName as String] as? String) ?? ""
+            if ignoredOwners.contains(ownerName) {
                 continue
             }
             let layer = (entry[kCGWindowLayer as String] as? Int) ?? 0
-            if layer != 0 { continue } // Normal app windows live at layer 0
+            if layer != 0 { continue } // Normal app windows live at layer 0 (excludes overlays/HUDs/pins)
             let alpha = (entry[kCGWindowAlpha as String] as? Double) ?? 1.0
             if alpha <= 0.05 { continue }
             guard let boundsDict = entry[kCGWindowBounds as String] as? NSDictionary,
@@ -128,9 +138,41 @@ public enum ScreenCaptureService {
                   cgRect.width >= 24 && cgRect.height >= 24 else {
                 continue
             }
-            rects.append(ASRect(x: cgRect.origin.x, y: cgRect.origin.y, width: cgRect.width, height: cgRect.height))
+            let title = (entry[kCGWindowName as String] as? String) ?? ""
+            descriptors.append(GlobalWindowDescriptor(
+                windowID: winID,
+                ownerName: ownerName,
+                title: title,
+                globalRectTopDown: ASRect(x: cgRect.origin.x, y: cgRect.origin.y, width: cgRect.width, height: cgRect.height)
+            ))
         }
-        return rects
+        return descriptors
+    }
+
+    /// Captures a single independent application window at 1:1 native Retina resolution with transparent rounded corners
+    /// and zero occlusion from overlapping windows or desktop wallpaper.
+    public static func captureSingleWindow(windowID: UInt32, fallbackScale: Double) async -> CGImage? {
+        guard windowID != 0 else { return nil }
+        do {
+            let shareable = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+            guard let scWin = shareable.windows.first(where: { $0.windowID == windowID }) else {
+                return nil
+            }
+            let filter = SCContentFilter(desktopIndependentWindow: scWin)
+            let filterScale = Double(filter.pointPixelScale)
+            let scale = max(1.0, filterScale > 0.5 ? filterScale : fallbackScale)
+            let rect = filter.contentRect.width > 1 && filter.contentRect.height > 1 ? filter.contentRect : scWin.frame
+            let cfg = SCStreamConfiguration()
+            cfg.width = max(1, Int((rect.width * scale).rounded()))
+            cfg.height = max(1, Int((rect.height * scale).rounded()))
+            cfg.showsCursor = false
+            cfg.capturesAudio = false
+            cfg.shouldBeOpaque = false
+            cfg.ignoreShadowsSingleWindow = true
+            return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg)
+        } catch {
+            return nil
+        }
     }
 
     /// Captures all connected displays in parallel at native physical pixel resolution.
@@ -138,7 +180,7 @@ public enum ScreenCaptureService {
         let screens = NSScreen.screens
         guard !screens.isEmpty else { return [] }
         let primaryHeight = screens[0].frame.height
-        let globalWinRects = queryOnScreenWindowsGlobalTopDown()
+        let globalWindows = queryOnScreenWindowsGlobalTopDown(excludingWindowNumbers: excludingWindowNumbers)
 
         let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let excludedSCWindows = shareable.windows.filter { excludingWindowNumbers.contains(Int($0.windowID)) }
@@ -173,7 +215,8 @@ public enum ScreenCaptureService {
             )
 
             let localScreenSize = ASRect(x: 0, y: 0, width: screenTopDown.width, height: screenTopDown.height)
-            let localWindows: [WindowSnapCandidate] = globalWinRects.compactMap { wr in
+            let localWindows: [WindowSnapCandidate] = globalWindows.compactMap { desc in
+                let wr = desc.globalRectTopDown
                 let ix0 = max(screenTopDown.minX, wr.minX)
                 let iy0 = max(screenTopDown.minY, wr.minY)
                 let ix1 = min(screenTopDown.maxX, wr.maxX)
@@ -186,7 +229,20 @@ public enum ScreenCaptureService {
                     width: w,
                     height: h
                 )
-                return WindowSnapCandidate.make(localRect: localRect, screenSize: localScreenSize)
+                let unclippedLocal = ASRect(
+                    x: wr.minX - screenTopDown.minX,
+                    y: wr.minY - screenTopDown.minY,
+                    width: wr.width,
+                    height: wr.height
+                )
+                return WindowSnapCandidate.make(
+                    windowID: desc.windowID,
+                    localRect: localRect,
+                    unclippedLocalRect: unclippedLocal,
+                    ownerName: desc.ownerName,
+                    title: desc.title,
+                    screenSize: localScreenSize
+                )
             }
 
             results.append(CapturedScreenSnapshot(
@@ -757,6 +813,7 @@ public final class GlobalHotkeyManager {
         case pinBorderToggle = 3
         case ocrCapture = 4
         case longshotCapture = 5
+        case windowCapture = 6
     }
 
     private var eventHandlerRef: EventHandlerRef?
@@ -806,6 +863,7 @@ public final class GlobalHotkeyManager {
 
         let items: [(Action, String, HotkeyBinding)] = [
             (.screenshot, "截图", hotkeys.screenshot),
+            (.windowCapture, "窗体截图", hotkeys.windowCapture),
             (.longshotCapture, "页面长截图", hotkeys.longshotCapture),
             (.ocrCapture, "截图识字", hotkeys.ocrCapture),
             (.pin, "贴图", hotkeys.pin),

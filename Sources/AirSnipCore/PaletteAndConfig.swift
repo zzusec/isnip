@@ -459,6 +459,7 @@ public enum KeyCodeLabels {
 
 public struct HotkeyConfig: Codable, Equatable, Sendable {
     public var screenshot: HotkeyBinding
+    public var windowCapture: HotkeyBinding
     public var longshotCapture: HotkeyBinding
     public var ocrCapture: HotkeyBinding
     public var pin: HotkeyBinding
@@ -469,6 +470,7 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
 
     public init(
         screenshot: HotkeyBinding = HotkeyBinding(keyCode: kVK_F1, modifiers: []),
+        windowCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F5, modifiers: []),
         longshotCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F4, modifiers: []),
         ocrCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F2, modifiers: []),
         pin: HotkeyBinding = HotkeyBinding(keyCode: kVK_F3, modifiers: []),
@@ -478,6 +480,7 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
         ocr: HotkeyBinding = HotkeyBinding(keyCode: kVK_ANSI_T, modifiers: [])
     ) {
         self.screenshot = screenshot
+        self.windowCapture = windowCapture
         self.longshotCapture = longshotCapture
         self.ocrCapture = ocrCapture
         self.pin = pin
@@ -488,7 +491,7 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case screenshot, longshotCapture, ocrCapture, pin, pinBorderToggle, recapture, longshot, ocr
+        case screenshot, windowCapture, longshotCapture, ocrCapture, pin, pinBorderToggle, recapture, longshot, ocr
     }
 
     public init(from decoder: Decoder) throws {
@@ -507,6 +510,12 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
         } else {
             let existingGlobals = [ss, oc, pn, pb]
             self.longshotCapture = existingGlobals.contains(defaults.longshotCapture) ? .unbound : defaults.longshotCapture
+        }
+        if let decodedWC = try c.decodeIfPresent(HotkeyBinding.self, forKey: .windowCapture) {
+            self.windowCapture = decodedWC
+        } else {
+            let existingGlobals = [ss, self.longshotCapture, oc, pn, pb]
+            self.windowCapture = existingGlobals.contains(defaults.windowCapture) ? .unbound : defaults.windowCapture
         }
         self.recapture = try c.decodeIfPresent(HotkeyBinding.self, forKey: .recapture) ?? defaults.recapture
         self.longshot = try c.decodeIfPresent(HotkeyBinding.self, forKey: .longshot) ?? defaults.longshot
@@ -763,6 +772,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var defaultNumberFontSize: Double
     public var styleDefaultsMigratedV2: Bool
     public var windowSnap: Bool
+    public var windowCaptureShadow: Bool
     public var confirmCancel: Bool
     public var showCompletionToast: Bool
     public var toolbar: ToolbarVisibilityConfig
@@ -802,6 +812,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         defaultNumberFontSize: Double = 20.0,
         styleDefaultsMigratedV2: Bool = true,
         windowSnap: Bool = true,
+        windowCaptureShadow: Bool = true,
         confirmCancel: Bool = true,
         showCompletionToast: Bool = true,
         toolbar: ToolbarVisibilityConfig = ToolbarVisibilityConfig(),
@@ -840,6 +851,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.defaultNumberFontSize = defaultNumberFontSize
         self.styleDefaultsMigratedV2 = styleDefaultsMigratedV2
         self.windowSnap = windowSnap
+        self.windowCaptureShadow = windowCaptureShadow
         self.confirmCancel = confirmCancel
         self.showCompletionToast = showCompletionToast
         self.toolbar = toolbar
@@ -863,7 +875,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         case swatchColors, activeColorIndex, lastTool, defaultLineWidth, defaultFillEnabled
         case defaultBlurRadius, defaultFontSize, defaultFontFamily, defaultFontBold, defaultFontItalic, defaultNumberFontSize
         case styleDefaultsMigratedV2
-        case windowSnap, confirmCancel, showCompletionToast
+        case windowSnap, windowCaptureShadow, confirmCancel, showCompletionToast
         case toolbar, nameStyle, lastSaveFormat, lastSaveDirectory, askBeforeSave
         case smartPngCompression, pngCompressionQuality, compressClipboardPng
         case longshotMaxHeight, longshotAutoScroll, longshotScrollSpeed
@@ -906,6 +918,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.defaultNumberFontSize = try c.decodeIfPresent(Double.self, forKey: .defaultNumberFontSize) ?? d.defaultNumberFontSize
         self.styleDefaultsMigratedV2 = true
         self.windowSnap = try c.decodeIfPresent(Bool.self, forKey: .windowSnap) ?? d.windowSnap
+        self.windowCaptureShadow = try c.decodeIfPresent(Bool.self, forKey: .windowCaptureShadow) ?? d.windowCaptureShadow
         self.confirmCancel = try c.decodeIfPresent(Bool.self, forKey: .confirmCancel) ?? d.confirmCancel
         self.showCompletionToast = try c.decodeIfPresent(Bool.self, forKey: .showCompletionToast) ?? d.showCompletionToast
         self.toolbar = try c.decodeIfPresent(ToolbarVisibilityConfig.self, forKey: .toolbar) ?? d.toolbar
@@ -977,6 +990,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         var conflicts: [String] = []
         let globalList: [(String, HotkeyBinding)] = [
             ("截图", hotkeys.screenshot),
+            ("窗体截图", hotkeys.windowCapture),
             ("页面长截图", hotkeys.longshotCapture),
             ("截图识字", hotkeys.ocrCapture),
             ("贴图", hotkeys.pin),

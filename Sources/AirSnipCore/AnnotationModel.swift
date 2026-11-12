@@ -67,40 +67,99 @@ public struct ASRect: Equatable, Hashable, Codable, Sendable {
 }
 
 public struct WindowSnapCandidate: Equatable, Sendable {
+    public let windowID: UInt32
     public let rect: ASRect
+    public let unclippedRect: ASRect
+    public let ownerName: String
+    public let title: String
     public let isMaximizedLike: Bool
 
-    public init(rect: ASRect, isMaximizedLike: Bool) {
+    public init(
+        windowID: UInt32 = 0,
+        rect: ASRect,
+        unclippedRect: ASRect? = nil,
+        ownerName: String = "",
+        title: String = "",
+        isMaximizedLike: Bool
+    ) {
+        self.windowID = windowID
         self.rect = rect
+        self.unclippedRect = unclippedRect ?? rect
+        self.ownerName = ownerName
+        self.title = title
         self.isMaximizedLike = isMaximizedLike
     }
 
-    public static func make(localRect: ASRect, screenSize: ASRect) -> WindowSnapCandidate? {
+    public static func make(
+        windowID: UInt32 = 0,
+        localRect: ASRect,
+        unclippedLocalRect: ASRect? = nil,
+        ownerName: String = "",
+        title: String = "",
+        screenSize: ASRect
+    ) -> WindowSnapCandidate? {
         guard localRect.width >= 16 && localRect.height >= 16 else { return nil }
         let fullArea = max(1.0, screenSize.width * screenSize.height)
         let isMax = localRect.width >= screenSize.width * 0.92
             && localRect.height >= screenSize.height * 0.82
             && (localRect.width * localRect.height) / fullArea >= 0.78
-        return WindowSnapCandidate(rect: localRect, isMaximizedLike: isMax)
+        return WindowSnapCandidate(
+            windowID: windowID,
+            rect: localRect,
+            unclippedRect: unclippedLocalRect ?? localRect,
+            ownerName: ownerName,
+            title: title,
+            isMaximizedLike: isMax
+        )
     }
 }
 
 public enum WindowSnapResolver {
-    /// Resolves the topmost visible window containing `point` in strict front-to-back Z-order.
-    /// Crucially stops at the first hit so maximized foreground windows (e.g. Chrome) occlude
-    /// tiled/split background windows underneath rather than piercing through them.
+    /// Returns all visible windows containing `point` in strict front-to-back Z-order.
+    public static func candidatesContaining(
+        at point: ASPoint,
+        candidatesFrontToBack: [WindowSnapCandidate],
+        allowMaximizedSnap: Bool
+    ) -> [WindowSnapCandidate] {
+        let hits = candidatesFrontToBack.filter { $0.rect.contains(point) }
+        guard let frontmost = hits.first else { return [] }
+        if !allowMaximizedSnap {
+            if frontmost.isMaximizedLike { return [] }
+            return [frontmost]
+        }
+        return hits
+    }
+
+    /// Resolves the topmost visible window candidate containing `point` in strict front-to-back Z-order
+    /// (or a specific depth index when cycling overlapping windows in Window Capture mode).
+    /// Crucially stops at the first hit when `!allowMaximizedSnap` so maximized foreground windows (e.g. Chrome)
+    /// occlude tiled/split background windows underneath rather than piercing through them.
+    public static func resolveCandidate(
+        at point: ASPoint,
+        candidatesFrontToBack: [WindowSnapCandidate],
+        allowMaximizedSnap: Bool,
+        depthIndex: Int = 0
+    ) -> WindowSnapCandidate? {
+        let hits = candidatesContaining(
+            at: point,
+            candidatesFrontToBack: candidatesFrontToBack,
+            allowMaximizedSnap: allowMaximizedSnap
+        )
+        guard !hits.isEmpty else { return nil }
+        let idx = ((depthIndex % hits.count) + hits.count) % hits.count
+        return hits[idx]
+    }
+
     public static func resolve(
         at point: ASPoint,
         candidatesFrontToBack: [WindowSnapCandidate],
         allowMaximizedSnap: Bool
     ) -> ASRect? {
-        guard let frontmost = candidatesFrontToBack.first(where: { $0.rect.contains(point) }) else {
-            return nil
-        }
-        if frontmost.isMaximizedLike && !allowMaximizedSnap {
-            return nil
-        }
-        return frontmost.rect
+        resolveCandidate(
+            at: point,
+            candidatesFrontToBack: candidatesFrontToBack,
+            allowMaximizedSnap: allowMaximizedSnap
+        )?.rect
     }
 }
 

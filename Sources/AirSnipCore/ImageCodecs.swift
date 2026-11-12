@@ -600,7 +600,10 @@ public enum ImageEncoder {
             }
             return raw
         case .jpeg:
-            let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: jpegQuality]
+            let props: [CFString: Any] = [
+                kCGImageDestinationLossyCompressionQuality: jpegQuality,
+                kCGImageDestinationBackgroundColor: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+            ]
             return try encodeWithImageIO(image, utType: UTType.jpeg.identifier, properties: props)
         case .webp:
             guard image.width <= 16384 && image.height <= 16384 else {

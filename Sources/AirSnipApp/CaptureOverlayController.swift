@@ -79,10 +79,16 @@ private enum DirectionalResizeCursor {
 public final class CaptureSessionCoordinator {
     public enum SessionMode {
         case normalCapture
+        case directWindowCapture
         case directOCRCapture
         case directLongshotCapture
         case inlinePinEdit(PinWindowController)
         case standaloneImageEdit(CGImage, Double, NSScreen)
+    }
+
+    public var isDirectWindowCapture: Bool {
+        if case .directWindowCapture = mode { return true }
+        return false
     }
 
     public var isDirectOCRCapture: Bool {
@@ -93,6 +99,20 @@ public final class CaptureSessionCoordinator {
     public var isDirectLongshotCapture: Bool {
         if case .directLongshotCapture = mode { return true }
         return false
+    }
+
+    public var isInlinePinEdit: Bool {
+        if case .inlinePinEdit = mode { return true }
+        return false
+    }
+
+    public var canToggleWindowPickerWithSpace: Bool {
+        switch mode {
+        case .normalCapture, .directWindowCapture:
+            return true
+        default:
+            return false
+        }
     }
 
     private var screenControllers: [OverlayScreenController] = []
@@ -134,6 +154,11 @@ public final class CaptureSessionCoordinator {
     public func renderToolbarVerificationSample(selection: ASRect) -> (toolbarIDs: [String], hasSecondaryBar: Bool, croppedImage: CGImage?)? {
         guard let ctrl = screenControllers.first else { return nil }
         return ctrl.canvasView.renderVerificationSample(selection: selection)
+    }
+
+    public func renderIsolatedWindowVerificationSample(windowImage: CGImage, rect: ASRect, includeShadow: Bool) -> CGImage? {
+        guard let ctrl = screenControllers.first else { return nil }
+        return ctrl.canvasView.renderIsolatedWindowVerificationSample(windowImage: windowImage, rect: rect, includeShadow: includeShadow)
     }
 
     public func refocus() {
@@ -480,10 +505,22 @@ final class OverlayCanvasView: NSView {
     weak var ownerController: OverlayScreenController?
     weak var coordinator: CaptureSessionCoordinator?
 
+    private struct IsolatedWindowCapture {
+        let rawImage: CGImage
+        let rawBuffer: PixelBufferRGBA
+        let pixelScale: Double
+        var includeShadow: Bool
+        let ownerName: String
+    }
+
     private var snapshot: CapturedScreenSnapshot
     private var selection: ASRect?
-    private let selectionLocked: Bool
-    private var hoveredWindowRect: ASRect?
+    private var selectionLocked: Bool
+    private var windowPickerMode: Bool
+    private var windowDepthIndex: Int = 0
+    private var hoveredWindowCandidate: WindowSnapCandidate?
+    private var isolatedWindowCapture: IsolatedWindowCapture?
+    private var isCapturingIsolatedWindow: Bool = false
     private var cursorPoint: ASPoint = ASPoint(200, 200)
 
     private let document = AnnotationDocument()
@@ -609,6 +646,7 @@ final class OverlayCanvasView: NSView {
         self.textItalic = cfg.defaultFontItalic
         self.selection = lockedInitialSelection
         self.selectionLocked = (lockedInitialSelection != nil)
+        self.windowPickerMode = (lockedInitialSelection == nil) && coordinator.isDirectWindowCapture
 
         let globalMouse = NSEvent.mouseLocation
         let sf = snapshot.frameInGlobalAppKit
@@ -616,14 +654,14 @@ final class OverlayCanvasView: NSView {
         let initY = max(0, min(Double(sf.height), Double(sf.maxY - globalMouse.y)))
         let initPt = ASPoint(initX, initY)
         self.cursorPoint = initPt
-        if lockedInitialSelection == nil && cfg.windowSnap {
-            self.hoveredWindowRect = WindowSnapResolver.resolve(
+        if lockedInitialSelection == nil && (coordinator.isDirectWindowCapture || cfg.windowSnap) {
+            self.hoveredWindowCandidate = WindowSnapResolver.resolveCandidate(
                 at: initPt,
                 candidatesFrontToBack: snapshot.windowsLocalTopDown,
-                allowMaximizedSnap: coordinator.isDirectLongshotCapture
+                allowMaximizedSnap: coordinator.isDirectWindowCapture || coordinator.isDirectLongshotCapture
             )
         } else {
-            self.hoveredWindowRect = nil
+            self.hoveredWindowCandidate = nil
         }
 
         super.init(frame: frame)
@@ -642,6 +680,7 @@ final class OverlayCanvasView: NSView {
     func resetSelectionState() {
         guard !selectionLocked else { return }
         commitInlineEditorsIfNeeded()
+        isolatedWindowCapture = nil
         selection = nil
         activeTool = nil
         pressedItemID = nil
@@ -649,6 +688,39 @@ final class OverlayCanvasView: NSView {
         document.clearAll()
         colorPicker = nil
         needsDisplay = true
+    }
+
+    func renderIsolatedWindowVerificationSample(windowImage: CGImage, rect: ASRect, includeShadow: Bool) -> CGImage? {
+        guard let rawBuf = PixelBufferRGBA(cgImage: windowImage) else { return nil }
+        let pxScale = Double(windowImage.width) / max(1.0, rect.width)
+        isolatedWindowCapture = IsolatedWindowCapture(
+            rawImage: windowImage,
+            rawBuffer: rawBuf,
+            pixelScale: pxScale,
+            includeShadow: includeShadow,
+            ownerName: "SampleApp"
+        )
+        selection = rect
+        selectionLocked = true
+        document.clearAll()
+        document.add(
+            AnnotationObject(
+                style: AnnotationStyle(color: RGBAColor(r: 255, g: 0, b: 0), lineWidth: 2.0),
+                kind: .rect(
+                    a: ASPoint(rect.minX + 12, rect.minY + 12),
+                    b: ASPoint(min(rect.maxX - 12, rect.minX + 92), min(rect.maxY - 12, rect.minY + 52)),
+                    cornerRadius: 4,
+                    filled: false
+                )
+            ),
+            select: false
+        )
+        let out = bakeCurrentSelectionOutput(applyWindowShadow: true)
+        isolatedWindowCapture = nil
+        selection = nil
+        selectionLocked = false
+        document.clearAll()
+        return out
     }
 
     func renderVerificationSample(selection sel: ASRect) -> (toolbarIDs: [String], hasSecondaryBar: Bool, croppedImage: CGImage?) {
@@ -950,39 +1022,82 @@ final class OverlayCanvasView: NSView {
         ctx.restoreGState()
 
         if let sel = selection, sel.width >= 1 && sel.height >= 1 {
-            // 2. Dim outside selection
-            ctx.saveGState()
-            let dimPath = CGMutablePath()
-            dimPath.addRect(bounds)
-            dimPath.addRect(sel.cgRect)
-            ctx.addPath(dimPath)
-            ctx.clip(using: .evenOdd)
-            ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.45))
-            ctx.fill(bounds)
-            ctx.restoreGState()
+            if let iso = isolatedWindowCapture {
+                // Isolated Window Capture stage: dim frozen desktop softly and present the unoccluded window
+                ctx.saveGState()
+                ctx.setFillColor(CGColor(srgbRed: 0.06, green: 0.07, blue: 0.09, alpha: 0.62))
+                ctx.fill(bounds)
 
-            // 3. Draw annotations clipped inside selection
-            AnnotationRenderer.drawAnnotations(
-                in: ctx,
-                objects: document.objects,
-                rawBuffer: snapshot.rawBuffer,
-                rawOrigin: ASPoint(0, 0),
-                pixelScale: snapshot.backingScale,
-                clipBounds: sel
-            )
+                let r = sel.cgRect
+                ctx.saveGState()
+                if iso.includeShadow {
+                    ctx.setShadow(
+                        offset: CGSize(width: 0, height: 10.0),
+                        blur: 26.0,
+                        color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.42)
+                    )
+                }
+                ctx.translateBy(x: r.minX, y: r.maxY)
+                ctx.scaleBy(x: 1, y: -1)
+                ctx.interpolationQuality = .high
+                ctx.draw(iso.rawImage, in: CGRect(x: 0, y: 0, width: r.width, height: r.height))
+                ctx.restoreGState()
+                ctx.restoreGState()
 
-            // 4. Precision 1px pixel-snapped selection border & 8 circular control knots
-            drawSelectionFrameAndHandles(in: ctx, selection: sel)
+                AnnotationRenderer.drawAnnotations(
+                    in: ctx,
+                    objects: document.objects,
+                    rawBuffer: iso.rawBuffer,
+                    rawOrigin: ASPoint(sel.minX, sel.minY),
+                    pixelScale: iso.pixelScale,
+                    clipBounds: sel
+                )
 
-            // 5. Selected annotation gizmos
-            if let selObj = document.selectedObject {
-                AnnotationRenderer.drawSelectionGizmos(in: ctx, for: selObj)
+                drawSelectionFrameAndHandles(in: ctx, selection: sel)
+                if let selObj = document.selectedObject {
+                    AnnotationRenderer.drawSelectionGizmos(in: ctx, for: selObj)
+                }
+
+                let shadowTag = iso.includeShadow ? "" : " · 无阴影"
+                let pillText = iso.ownerName.isEmpty
+                    ? "\(iso.rawImage.width) × \(iso.rawImage.height)\(shadowTag)"
+                    : "\(iso.ownerName) · \(iso.rawImage.width) × \(iso.rawImage.height)\(shadowTag)"
+                drawDimensionPill(in: ctx, selection: sel, text: pillText)
+            } else {
+                // 2. Dim outside selection
+                ctx.saveGState()
+                let dimPath = CGMutablePath()
+                dimPath.addRect(bounds)
+                dimPath.addRect(sel.cgRect)
+                ctx.addPath(dimPath)
+                ctx.clip(using: .evenOdd)
+                ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.45))
+                ctx.fill(bounds)
+                ctx.restoreGState()
+
+                // 3. Draw annotations clipped inside selection
+                AnnotationRenderer.drawAnnotations(
+                    in: ctx,
+                    objects: document.objects,
+                    rawBuffer: snapshot.rawBuffer,
+                    rawOrigin: ASPoint(0, 0),
+                    pixelScale: snapshot.backingScale,
+                    clipBounds: sel
+                )
+
+                // 4. Precision 1px pixel-snapped selection border & 8 circular control knots
+                drawSelectionFrameAndHandles(in: ctx, selection: sel)
+
+                // 5. Selected annotation gizmos
+                if let selObj = document.selectedObject {
+                    AnnotationRenderer.drawSelectionGizmos(in: ctx, for: selObj)
+                }
+
+                // 6. Frosted pixel dimension pill at top-left of selection
+                let pxW = max(1, Int((sel.width * snapshot.backingScale).rounded()))
+                let pxH = max(1, Int((sel.height * snapshot.backingScale).rounded()))
+                drawDimensionPill(in: ctx, selection: sel, text: "\(pxW) × \(pxH)")
             }
-
-            // 6. Frosted pixel dimension pill at top-left of selection
-            let pxW = max(1, Int((sel.width * snapshot.backingScale).rounded()))
-            let pxH = max(1, Int((sel.height * snapshot.backingScale).rounded()))
-            drawDimensionPill(in: ctx, selection: sel, text: "\(pxW) × \(pxH)")
 
             // 7. Floating annotation toolbar + optional style sub-bar + color picker + tooltip
             if case .creatingSelection = dragOp {
@@ -1004,33 +1119,71 @@ final class OverlayCanvasView: NSView {
         } else {
             toolbarHitItems.removeAll()
             // Unselected state: keep frozen screen completely still at 100% original brightness;
-            // only dim outside a hovered floating window when window-snap highlights one.
-            if let winRect = hoveredWindowRect, coordinator?.config.windowSnap == true {
+            // only dim outside a hovered window when window-snap or windowPickerMode highlights one.
+            if let cand = hoveredWindowCandidate, (windowPickerMode || coordinator?.config.windowSnap == true) {
+                let winRect = cand.rect
+                let radius: CGFloat = windowPickerMode ? 10.0 : 0.0
+                let highlightPath = radius > 0
+                    ? CGPath(roundedRect: winRect.cgRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+                    : CGPath(rect: winRect.cgRect, transform: nil)
+
                 ctx.saveGState()
                 let dimPath = CGMutablePath()
                 dimPath.addRect(bounds)
-                dimPath.addRect(winRect.cgRect)
+                dimPath.addPath(highlightPath)
                 ctx.addPath(dimPath)
                 ctx.clip(using: .evenOdd)
-                ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.26))
+                ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: windowPickerMode ? 0.36 : 0.26))
                 ctx.fill(bounds)
                 ctx.restoreGState()
 
-                let snapped = pixelSnapRect(winRect.cgRect, lineWidth: 1.5)
-                ctx.setFillColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.04))
-                ctx.fill(snapped)
-                ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.95))
-                ctx.setLineWidth(1.5)
-                ctx.stroke(snapped)
+                let snapped = pixelSnapRect(winRect.cgRect, lineWidth: windowPickerMode ? 2.0 : 1.5)
+                let strokePath = radius > 0
+                    ? CGPath(roundedRect: snapped, cornerWidth: radius, cornerHeight: radius, transform: nil)
+                    : CGPath(rect: snapped, transform: nil)
+                ctx.saveGState()
+                ctx.addPath(strokePath)
+                ctx.setFillColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: windowPickerMode ? 0.07 : 0.04))
+                ctx.fillPath()
+                ctx.addPath(strokePath)
+                ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.96))
+                ctx.setLineWidth(windowPickerMode ? 2.0 : 1.5)
+                ctx.strokePath()
+                ctx.restoreGState()
 
-                let pxW = Int((winRect.width * snapshot.backingScale).rounded())
-                let pxH = Int((winRect.height * snapshot.backingScale).rounded())
-                drawDimensionPill(in: ctx, selection: winRect, text: "\(pxW) × \(pxH)")
+                let rawW = windowPickerMode ? cand.unclippedRect.width : winRect.width
+                let rawH = windowPickerMode ? cand.unclippedRect.height : winRect.height
+                let pxW = Int((rawW * snapshot.backingScale).rounded())
+                let pxH = Int((rawH * snapshot.backingScale).rounded())
+                let pillLabel: String
+                if windowPickerMode {
+                    let hits = WindowSnapResolver.candidatesContaining(
+                        at: cursorPoint,
+                        candidatesFrontToBack: snapshot.windowsLocalTopDown,
+                        allowMaximizedSnap: true
+                    )
+                    let stackPrefix: String
+                    if hits.count > 1 {
+                        let curIdx = ((windowDepthIndex % hits.count) + hits.count) % hits.count
+                        stackPrefix = "\(curIdx + 1)/\(hits.count) "
+                    } else {
+                        stackPrefix = ""
+                    }
+                    let namePart = cand.ownerName.isEmpty ? "" : "\(cand.ownerName) · "
+                    pillLabel = "\(stackPrefix)\(namePart)\(pxW) × \(pxH)"
+                } else {
+                    pillLabel = "\(pxW) × \(pxH)"
+                }
+                drawDimensionPill(in: ctx, selection: winRect, text: pillLabel)
             }
 
-            drawMagnifierHUD(in: ctx, at: cursorPoint)
+            if !windowPickerMode {
+                drawMagnifierHUD(in: ctx, at: cursorPoint)
+            }
 
-            if coordinator?.isDirectOCRCapture == true, cancelConfirmBanner == nil {
+            if windowPickerMode, cancelConfirmBanner == nil {
+                drawCancelConfirmBanner(in: ctx, message: "点击窗口截图（⌥切换阴影 · Tab切换叠放窗口） · Space 切换框选 · Esc 取消")
+            } else if coordinator?.isDirectOCRCapture == true, cancelConfirmBanner == nil {
                 drawCancelConfirmBanner(in: ctx, message: "框选或点击窗口识字 · Esc 取消")
             } else if coordinator?.isDirectLongshotCapture == true, cancelConfirmBanner == nil {
                 drawCancelConfirmBanner(in: ctx, message: "框选滚动区域或点击窗口自动翻页长截图 · Esc 取消")
@@ -1369,7 +1522,7 @@ final class OverlayCanvasView: NSView {
             ))
         }
 
-        if vis.isVisible(.pin), !selectionLocked {
+        if vis.isVisible(.pin), !(coordinator?.isInlinePinEdit ?? false) {
             let pinKey = cfg.hotkeys.pin.isUnbound ? "" : " · \(cfg.hotkeys.pin.displayString)"
             items.append(BarButtonSpec(
                 id: "output.pin",
@@ -2603,14 +2756,28 @@ final class OverlayCanvasView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         let pt = ASPoint(convert(event.locationInWindow, from: nil))
-        cursorPoint = pt
-
         guard let sel = selection else {
             if hoveredResizeHandle != nil { hoveredResizeHandle = nil }
-            hoveredWindowRect = resolveHoveredWindow(at: pt)
+            let prevFrontID = WindowSnapResolver.resolveCandidate(
+                at: cursorPoint,
+                candidatesFrontToBack: snapshot.windowsLocalTopDown,
+                allowMaximizedSnap: true
+            )?.windowID
+            let nextFrontID = WindowSnapResolver.resolveCandidate(
+                at: pt,
+                candidatesFrontToBack: snapshot.windowsLocalTopDown,
+                allowMaximizedSnap: true
+            )?.windowID
+            if prevFrontID != nextFrontID {
+                windowDepthIndex = 0
+            }
+            cursorPoint = pt
+            hoveredWindowCandidate = resolveHoveredWindowCandidate(at: pt)
+            updateCursor(at: pt, flags: event.modifierFlags)
             needsDisplay = true
             return
         }
+        cursorPoint = pt
 
         // Toolbar hover & 400ms tooltip (EDT-10)
         var shouldRedraw = false
@@ -2674,9 +2841,17 @@ final class OverlayCanvasView: NSView {
         updateCursor(at: pt, flags: event.modifierFlags)
     }
 
-    private func resolveHoveredWindow(at pt: ASPoint) -> ASRect? {
+    private func resolveHoveredWindowCandidate(at pt: ASPoint) -> WindowSnapCandidate? {
+        if windowPickerMode {
+            return WindowSnapResolver.resolveCandidate(
+                at: pt,
+                candidatesFrontToBack: snapshot.windowsLocalTopDown,
+                allowMaximizedSnap: true,
+                depthIndex: windowDepthIndex
+            )
+        }
         guard coordinator?.config.windowSnap == true else { return nil }
-        return WindowSnapResolver.resolve(
+        return WindowSnapResolver.resolveCandidate(
             at: pt,
             candidatesFrontToBack: snapshot.windowsLocalTopDown,
             allowMaximizedSnap: coordinator?.isDirectLongshotCapture == true
@@ -2697,7 +2872,11 @@ final class OverlayCanvasView: NSView {
             return
         }
         guard let sel = selection else {
-            NSCursor.crosshair.set()
+            if windowPickerMode && hoveredWindowCandidate != nil {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.crosshair.set()
+            }
             return
         }
         if spacePressed {
@@ -2995,9 +3174,14 @@ final class OverlayCanvasView: NSView {
 
         case .creatingSelection(let origin, _):
             let endPt = shift ? GeometrySnap.squareCorner(from: origin, to: clampedPt) : clampedPt
-            let moved = origin.distance(to: clampedPt) >= 3.0
+            let threshold = windowPickerMode ? 5.0 : 3.0
+            let moved = origin.distance(to: clampedPt) >= threshold
             dragOp = .creatingSelection(origin: origin, moved: moved)
             if moved {
+                if windowPickerMode {
+                    windowPickerMode = false
+                    hoveredWindowCandidate = nil
+                }
                 selection = ASRect.between(origin, endPt)
                 needsDisplay = true
             }
@@ -3123,8 +3307,17 @@ final class OverlayCanvasView: NSView {
 
         case .creatingSelection(_, let moved):
             if !moved {
-                if let snapped = hoveredWindowRect ?? resolveHoveredWindow(at: pt), coordinator?.config.windowSnap == true {
-                    selection = snapped
+                if windowPickerMode {
+                    if let cand = hoveredWindowCandidate ?? resolveHoveredWindowCandidate(at: pt) {
+                        let defaultShadow = coordinator?.config.windowCaptureShadow ?? true
+                        let includeShadow = event.modifierFlags.contains(.option) ? !defaultShadow : defaultShadow
+                        dragOp = .none
+                        captureAndPresentIsolatedWindow(candidate: cand, includeShadow: includeShadow)
+                        return
+                    }
+                } else if let cand = hoveredWindowCandidate ?? resolveHoveredWindowCandidate(at: pt),
+                          coordinator?.config.windowSnap == true {
+                    selection = cand.rect
                 }
             } else if let sel = selection, (sel.width < 4 || sel.height < 4) {
                 selection = nil
@@ -3258,8 +3451,33 @@ final class OverlayCanvasView: NSView {
         let shift = flags.contains(.shift)
 
         if kc == kVK_Space {
+            if selection == nil {
+                if !event.isARepeat, coordinator?.canToggleWindowPickerWithSpace == true {
+                    windowPickerMode.toggle()
+                    windowDepthIndex = 0
+                    hoveredWindowCandidate = resolveHoveredWindowCandidate(at: cursorPoint)
+                    updateCursor(at: cursorPoint, flags: event.modifierFlags)
+                    needsDisplay = true
+                }
+                return
+            }
             spacePressed = true
             NSCursor.openHand.set()
+            return
+        }
+
+        if kc == kVK_Tab, selection == nil, windowPickerMode {
+            let hits = WindowSnapResolver.candidatesContaining(
+                at: cursorPoint,
+                candidatesFrontToBack: snapshot.windowsLocalTopDown,
+                allowMaximizedSnap: true
+            )
+            if hits.count > 1 {
+                windowDepthIndex += shift ? -1 : 1
+                hoveredWindowCandidate = resolveHoveredWindowCandidate(at: cursorPoint)
+                updateCursor(at: cursorPoint, flags: event.modifierFlags)
+                needsDisplay = true
+            }
             return
         }
 
@@ -3281,7 +3499,7 @@ final class OverlayCanvasView: NSView {
                     triggerOCR()
                     return
                 }
-                if !cfg.hotkeys.pin.isUnbound && candidateBinding == cfg.hotkeys.pin && !selectionLocked {
+                if !cfg.hotkeys.pin.isUnbound && candidateBinding == cfg.hotkeys.pin && !(coordinator?.isInlinePinEdit ?? false) {
                     triggerPinOutput()
                     return
                 }
@@ -3339,6 +3557,15 @@ final class OverlayCanvasView: NSView {
             }
         case kVK_Delete, kVK_ForwardDelete:
             if document.deleteSelected() {
+                needsDisplay = true
+            } else if isolatedWindowCapture != nil, document.isEmpty {
+                isolatedWindowCapture = nil
+                selection = nil
+                selectionLocked = false
+                activeTool = nil
+                windowPickerMode = true
+                hoveredWindowCandidate = resolveHoveredWindowCandidate(at: cursorPoint)
+                updateCursor(at: cursorPoint, flags: event.modifierFlags)
                 needsDisplay = true
             }
         case kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow:
@@ -3738,7 +3965,10 @@ final class OverlayCanvasView: NSView {
             backingScale: Double(cg.width) / max(1.0, Double(bounds.width)),
             windowsLocalTopDown: []
         )
+        isolatedWindowCapture = nil
         selection = nil
+        selectionLocked = false
+        windowPickerMode = false
         activeTool = nil
         document.clearAll()
         colorPicker = nil
@@ -3746,9 +3976,82 @@ final class OverlayCanvasView: NSView {
         needsDisplay = true
     }
 
+    private func captureAndPresentIsolatedWindow(candidate: WindowSnapCandidate, includeShadow: Bool) {
+        guard !isCapturingIsolatedWindow else { return }
+        isCapturingIsolatedWindow = true
+        let fallbackScale = snapshot.backingScale
+        let screenW = Double(bounds.width)
+        let screenH = Double(bounds.height)
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isCapturingIsolatedWindow = false }
+
+            let capturedCG: CGImage
+            if let singleCG = await ScreenCaptureService.captureSingleWindow(windowID: candidate.windowID, fallbackScale: fallbackScale) {
+                capturedCG = singleCG
+            } else {
+                let pxRect = CGRect(
+                    x: (candidate.rect.minX * fallbackScale).rounded(.down),
+                    y: (candidate.rect.minY * fallbackScale).rounded(.down),
+                    width: max(1, (candidate.rect.width * fallbackScale).rounded()),
+                    height: max(1, (candidate.rect.height * fallbackScale).rounded())
+                )
+                guard let fallbackCG = self.snapshot.cgImage.cropping(to: pxRect) else { return }
+                capturedCG = fallbackCG
+            }
+            guard let rawBuf = PixelBufferRGBA(cgImage: capturedCG) else { return }
+
+            let logicalW = Double(capturedCG.width) / max(1.0, fallbackScale)
+            let logicalH = Double(capturedCG.height) / max(1.0, fallbackScale)
+            let maxDispW = max(32.0, screenW * 0.92)
+            let maxDispH = max(32.0, screenH * 0.86)
+            let fitRatio = min(1.0, min(maxDispW / max(1.0, logicalW), maxDispH / max(1.0, logicalH)))
+            let dispW = (logicalW * fitRatio).rounded()
+            let dispH = (logicalH * fitRatio).rounded()
+
+            let targetX: Double
+            let targetY: Double
+            if fitRatio >= 0.999
+                && candidate.unclippedRect.minX >= 0
+                && candidate.unclippedRect.minY >= 0
+                && candidate.unclippedRect.maxX <= screenW
+                && candidate.unclippedRect.maxY <= screenH {
+                targetX = candidate.unclippedRect.minX
+                targetY = candidate.unclippedRect.minY
+            } else {
+                targetX = max(8.0, min(screenW - dispW - 8.0, candidate.rect.midX - dispW * 0.5)).rounded()
+                targetY = max(8.0, min(screenH - dispH - 52.0, candidate.rect.midY - dispH * 0.5)).rounded()
+            }
+
+            let displayRect = ASRect(x: targetX, y: targetY, width: dispW, height: dispH)
+            let effectiveScale = Double(capturedCG.width) / max(1.0, dispW)
+
+            if let owner = self.ownerController {
+                self.coordinator?.clearSelectionOnOtherScreens(except: owner)
+            }
+            self.document.clearAll()
+            self.activeTool = nil
+            self.colorPicker = nil
+            self.isolatedWindowCapture = IsolatedWindowCapture(
+                rawImage: capturedCG,
+                rawBuffer: rawBuf,
+                pixelScale: effectiveScale,
+                includeShadow: includeShadow,
+                ownerName: candidate.ownerName
+            )
+            self.selection = displayRect
+            self.selectionLocked = true
+            self.needsDisplay = true
+        }
+    }
+
     // MARK: - Baking Raw vs Output & Finalizing
 
     private func cropRawSelectionImage() -> CGImage? {
+        if let iso = isolatedWindowCapture {
+            return iso.rawImage
+        }
         guard let sel = selection, sel.width >= 1 && sel.height >= 1 else { return nil }
         let pxRect = CGRect(
             x: (sel.minX * snapshot.backingScale).rounded(.down),
@@ -3759,8 +4062,27 @@ final class OverlayCanvasView: NSView {
         return snapshot.cgImage.cropping(to: pxRect)
     }
 
-    private func bakeCurrentSelectionOutput() -> CGImage? {
+    private func bakeCurrentSelectionOutput(applyWindowShadow: Bool = true) -> CGImage? {
         commitInlineEditorsIfNeeded()
+        if let iso = isolatedWindowCapture, let sel = selection {
+            let baseCG = iso.rawImage
+            let baked: CGImage
+            if document.isEmpty {
+                baked = baseCG
+            } else {
+                baked = AnnotationRenderer.bakeOutput(
+                    rawSelection: baseCG,
+                    objects: document.objects,
+                    selectionOrigin: ASPoint(sel.minX, sel.minY),
+                    pixelScale: iso.pixelScale
+                ) ?? baseCG
+            }
+            if applyWindowShadow && iso.includeShadow {
+                return AnnotationRenderer.applyWindowDropShadow(to: baked, scale: snapshot.backingScale) ?? baked
+            }
+            return baked
+        }
+
         guard let sel = selection, let rawCG = cropRawSelectionImage() else { return nil }
         if document.isEmpty {
             return rawCG
@@ -3774,23 +4096,24 @@ final class OverlayCanvasView: NSView {
     }
 
     private func triggerCopyOutput() {
-        guard let out = bakeCurrentSelectionOutput() else { return }
+        guard let out = bakeCurrentSelectionOutput(applyWindowShadow: true) else { return }
         coordinator?.finishWithCopy(image: out, scale: snapshot.backingScale)
     }
 
     private func triggerSaveOutput(forceDialog: Bool = false) {
-        guard let out = bakeCurrentSelectionOutput() else { return }
+        guard let out = bakeCurrentSelectionOutput(applyWindowShadow: true) else { return }
         coordinator?.finishWithSave(image: out, scale: snapshot.backingScale, forceDialog: forceDialog)
     }
 
     private func triggerPinOutput() {
-        guard let sel = selection, let out = bakeCurrentSelectionOutput() else { return }
+        guard let sel = selection, let out = bakeCurrentSelectionOutput(applyWindowShadow: false) else { return }
         let sFrame = snapshot.frameInGlobalAppKit
         let appKitOrigin = CGPoint(
             x: sFrame.minX + CGFloat(sel.minX),
             y: sFrame.maxY - CGFloat(sel.maxY)
         )
-        coordinator?.finishWithPin(image: out, scale: snapshot.backingScale, appKitOrigin: appKitOrigin)
+        let pinScale = isolatedWindowCapture?.pixelScale ?? snapshot.backingScale
+        coordinator?.finishWithPin(image: out, scale: pinScale, appKitOrigin: appKitOrigin)
     }
 
     private func triggerOCR() {

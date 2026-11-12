@@ -588,4 +588,82 @@ final class AirSnipCoreTests: XCTestCase {
         )
         XCTAssertNil(WindowSnapResolver.resolve(at: ASPoint(200, 350), candidatesFrontToBack: weChatOverChrome, allowMaximizedSnap: false))
     }
+
+    func testWindowCaptureOverlappingStackCycleAndDropShadowTransparency() throws {
+        let screen = ASRect(x: 0, y: 0, width: 1470, height: 956)
+        let topTerminal = WindowSnapCandidate.make(
+            windowID: 101,
+            localRect: ASRect(x: 0, y: 33, width: 735, height: 843),
+            ownerName: "终端",
+            title: "zsh",
+            screenSize: screen
+        )!
+        let midCloudDesk = WindowSnapCandidate.make(
+            windowID: 202,
+            localRect: ASRect(x: 95, y: 53, width: 1280, height: 763),
+            ownerName: "CloudDesk",
+            title: "Workspace",
+            screenSize: screen
+        )!
+        let backChrome = WindowSnapCandidate.make(
+            windowID: 303,
+            localRect: ASRect(x: 0, y: 33, width: 1470, height: 841),
+            ownerName: "Google Chrome",
+            title: "GitHub",
+            screenSize: screen
+        )!
+        let stack = [topTerminal, midCloudDesk, backChrome]
+        let pt = ASPoint(300, 300)
+
+        let hits = WindowSnapResolver.candidatesContaining(at: pt, candidatesFrontToBack: stack, allowMaximizedSnap: true)
+        XCTAssertEqual(hits.map(\.windowID), [101, 202, 303])
+        XCTAssertEqual(WindowSnapResolver.resolveCandidate(at: pt, candidatesFrontToBack: stack, allowMaximizedSnap: true, depthIndex: 0)?.windowID, 101)
+        XCTAssertEqual(WindowSnapResolver.resolveCandidate(at: pt, candidatesFrontToBack: stack, allowMaximizedSnap: true, depthIndex: 1)?.windowID, 202)
+        XCTAssertEqual(WindowSnapResolver.resolveCandidate(at: pt, candidatesFrontToBack: stack, allowMaximizedSnap: true, depthIndex: 2)?.windowID, 303)
+        XCTAssertEqual(WindowSnapResolver.resolveCandidate(at: pt, candidatesFrontToBack: stack, allowMaximizedSnap: true, depthIndex: 3)?.windowID, 101)
+
+        // Verify HotkeyConfig F5 default + legacy conflict avoidance
+        let defaultCfg = AirSnipConfig()
+        XCTAssertEqual(defaultCfg.hotkeys.windowCapture, HotkeyBinding(keyCode: kVK_F5, modifiers: []))
+        XCTAssertTrue(defaultCfg.windowCaptureShadow)
+        XCTAssertTrue(defaultCfg.hotkeyConflicts().isEmpty)
+
+        let f5OccupiedJSON = Data(#"""
+        {
+          "hotkeys": {
+            "pin": { "keyCode": 96, "modifiers": 0 }
+          }
+        }
+        """#.utf8)
+        let migrated = try JSONDecoder().decode(AirSnipConfig.self, from: f5OccupiedJSON)
+        XCTAssertEqual(migrated.hotkeys.pin.keyCode, kVK_F5)
+        XCTAssertTrue(migrated.hotkeys.windowCapture.isUnbound)
+        XCTAssertTrue(migrated.hotkeyConflicts().isEmpty)
+
+        // Verify Window Drop Shadow preserves transparent rounded corners & 1:1 unscaled center pixels
+        let w = 240, h = 160
+        let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let ctx = try XCTUnwrap(CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: w * 4,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        ctx.addPath(CGPath(roundedRect: CGRect(x: 0, y: 0, width: w, height: h), cornerWidth: 20, cornerHeight: 20, transform: nil))
+        ctx.setFillColor(CGColor(srgbRed: 0.12, green: 0.52, blue: 0.96, alpha: 1.0))
+        ctx.fillPath()
+        let winImg = try XCTUnwrap(ctx.makeImage())
+        let shadowed = try XCTUnwrap(AnnotationRenderer.applyWindowDropShadow(to: winImg, scale: 2.0))
+        XCTAssertEqual(shadowed.width, w + 136)
+        XCTAssertEqual(shadowed.height, h + 136)
+        let shadowedBuf = try XCTUnwrap(PixelBufferRGBA(cgImage: shadowed))
+        XCTAssertEqual(shadowedBuf.pixel(x: 0, y: 0).a, 0)
+        XCTAssertEqual(shadowedBuf.pixel(x: shadowed.width / 2, y: shadowed.height / 2).a, 255)
+        let shadowSample = shadowedBuf.pixel(x: shadowed.width / 2, y: 44 + h + 12)
+        XCTAssertGreaterThan(shadowSample.a, 0)
+        XCTAssertLessThan(shadowSample.a, 255)
+    }
 }

@@ -97,6 +97,48 @@ public enum AnnotationRenderer {
         return ctx.makeImage()
     }
 
+    /// Wraps a 1:1 Retina window image (with transparent rounded corners) in a native macOS-style
+    /// soft ambient drop shadow while preserving full RGBA transparency and exact unscaled window pixels.
+    public static func applyWindowDropShadow(
+        to windowImage: CGImage,
+        scale: Double
+    ) -> CGImage? {
+        let w = windowImage.width
+        let h = windowImage.height
+        guard w > 0, h > 0 else { return nil }
+        let s = max(1.0, scale)
+        let padX = Int((34.0 * s).rounded())
+        let padTop = Int((22.0 * s).rounded())
+        let padBottom = Int((46.0 * s).rounded())
+        let outW = w + padX * 2
+        let outH = h + padTop + padBottom
+
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil,
+            width: outW,
+            height: outH,
+            bitsPerComponent: 8,
+            bytesPerRow: outW * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        // CGContext uses bottom-left origin: window sits `padBottom` from bottom and `padTop` from top.
+        let drawRect = CGRect(x: padX, y: padBottom, width: w, height: h)
+        ctx.saveGState()
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: -CGFloat(10.0 * s)),
+            blur: CGFloat(26.0 * s),
+            color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.30)
+        )
+        ctx.draw(windowImage, in: drawRect)
+        ctx.restoreGState()
+        return ctx.makeImage()
+    }
+
     /// Draws all annotation objects in top-down point space into `ctx`.
     public static func drawAnnotations(
         in ctx: CGContext,

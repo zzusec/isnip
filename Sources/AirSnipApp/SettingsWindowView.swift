@@ -676,6 +676,16 @@ private struct CaptureAndPinPane: View {
                         set: { v in app.updateConfig { $0.windowSnap = v } }
                     )
                 )
+
+                SettingsRowDivider()
+
+                SettingsSwitchRow(
+                    title: "窗体截图保留阴影",
+                    isOn: Binding(
+                        get: { app.config.windowCaptureShadow },
+                        set: { v in app.updateConfig { $0.windowCaptureShadow = v } }
+                    )
+                )
             }
 
             SettingsSectionCard("页面长截图") {
@@ -884,6 +894,10 @@ private struct HotkeysSettingsPane: View {
             SettingsSectionCard("全局") {
                 HotkeyRow(title: "截图", slotID: "global.screenshot", binding: app.config.hotkeys.screenshot, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.screenshot = b }
+                }
+                SettingsRowDivider()
+                HotkeyRow(title: "窗体截图", slotID: "global.windowCapture", binding: app.config.hotkeys.windowCapture, recordingSlot: $recordingSlot) { b in
+                    app.updateConfig { $0.hotkeys.windowCapture = b }
                 }
                 SettingsRowDivider()
                 HotkeyRow(title: "页面长截图", slotID: "global.longshotCapture", binding: app.config.hotkeys.longshotCapture, recordingSlot: $recordingSlot) { b in
@@ -1347,7 +1361,7 @@ private struct AboutSettingsPane: View {
                             .padding(.vertical, 2)
                             .background(Capsule().fill(Color.accentColor.opacity(0.12)))
                     }
-                    Text("截图标注 · 页面长截图 · 无损压缩 · 贴图 · 离线 OCR")
+                    Text("截图标注 · 窗体截图 · 页面长截图 · 无损压缩 · 贴图 · 离线 OCR")
                         .font(.system(size: 12.5))
                         .foregroundStyle(.secondary)
                 }

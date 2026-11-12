@@ -288,6 +288,39 @@ public enum SmokeTestRunner {
                     }
                 }
 
+                // Verify Isolated Window Capture baking (transparent rounded corners + red annotation + macOS drop shadow)
+                var isolatedWindowOK = false
+                let winPxW = 320
+                let winPxH = 200
+                if let winCtx = CGContext(
+                    data: nil,
+                    width: winPxW,
+                    height: winPxH,
+                    bitsPerComponent: 8,
+                    bytesPerRow: winPxW * 4,
+                    space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                ) {
+                    let rr = CGPath(roundedRect: CGRect(x: 0, y: 0, width: winPxW, height: winPxH), cornerWidth: 24, cornerHeight: 24, transform: nil)
+                    winCtx.addPath(rr)
+                    winCtx.setFillColor(CGColor(srgbRed: 0.96, green: 0.97, blue: 0.99, alpha: 1.0))
+                    winCtx.fillPath()
+                    if let mockWinCG = winCtx.makeImage(),
+                       let shadowedWinCG = coordinator.renderIsolatedWindowVerificationSample(
+                           windowImage: mockWinCG,
+                           rect: ASRect(x: 80, y: 80, width: 160, height: 100),
+                           includeShadow: true
+                       ),
+                       let shadowedBuf = PixelBufferRGBA(cgImage: shadowedWinCG) {
+                        let cornerAlpha = shadowedBuf.pixel(x: 0, y: 0).a
+                        let centerPixel = shadowedBuf.pixel(x: shadowedWinCG.width / 2, y: shadowedWinCG.height / 2)
+                        isolatedWindowOK = shadowedWinCG.width > winPxW
+                            && shadowedWinCG.height > winPxH
+                            && cornerAlpha == 0
+                            && centerPixel.a == 255
+                    }
+                }
+
                 coordinator.cancelSession()
 
                 // Optional Settings window snapshot dump when AIRSNIP_SMOKE_PREVIEW_DIR is active
@@ -350,7 +383,7 @@ public enum SmokeTestRunner {
                     offWin.orderOut(nil)
                 }
 
-                return visibleAndPersistent && toolbarExactMatch && !coordinator.hasVisibleWindows && ended
+                return visibleAndPersistent && toolbarExactMatch && isolatedWindowOK && !coordinator.hasVisibleWindows && ended
             }
             guard overlayOK else {
                 fputs("FAIL: Overlay panel hidesOnDeactivate / accessory visibility check failed\n", stderr)
