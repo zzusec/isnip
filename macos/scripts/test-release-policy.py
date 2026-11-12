@@ -4,6 +4,7 @@
 import pathlib
 import plistlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -58,6 +59,19 @@ def main() -> None:
         fail("publish-release.sh must forbid publishing directly from main")
     if "--force" in script_text or "push -f" in script_text:
         fail("publish-release.sh must never force-push")
+
+    scripts_dir = ROOT / "macos" / "scripts"
+    for sh_file in sorted(scripts_dir.glob("*.sh")):
+        proc = subprocess.run(["/bin/sh", "-n", str(sh_file)], capture_output=True, text=True)
+        if proc.returncode != 0:
+            fail(f"Shell syntax error in {sh_file.name}: {proc.stderr.strip()}")
+        sh_text = sh_file.read_text(encoding="utf-8")
+        for lineno, line in enumerate(sh_text.splitlines(), 1):
+            m = re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]", line)
+            if m:
+                fail(
+                    f"Unbraced shell variable adjacent to UTF-8 char in {sh_file.name}:{lineno} ({m.group(0)!r}); use ${{var}}"
+                )
 
     print(f"release-policy: ok (iSnip v{version}, build {build})")
 

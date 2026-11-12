@@ -34,7 +34,7 @@ quit_running_app() {
   app_path=$1
   bin_name=$2
   if pgrep -f "$app_path/Contents/MacOS/$bin_name" >/dev/null 2>&1; then
-    echo "正在退出正在运行的 $bin_name…"
+    echo "正在退出正在运行的 ${bin_name}…"
     osascript -e "tell application id \"$bundle_id\" to quit" >/dev/null 2>&1 || true
     i=0
     while pgrep -f "$app_path/Contents/MacOS/$bin_name" >/dev/null 2>&1; do
