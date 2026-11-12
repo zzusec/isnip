@@ -18,6 +18,8 @@ public enum SmokeTestRunner {
             guard cfg.smartPngCompression == true,
                   cfg.compressClipboardPng == true,
                   cfg.askBeforeSave == false,
+                  cfg.longshotAutoScroll == true,
+                  cfg.longshotScrollSpeed == .normal,
                   cfg.swatchColors[1] == RGBAColor(r: 255, g: 0, b: 0),
                   cfg.defaultLineWidth == 2.0,
                   cfg.pngCompressionQuality == .visuallyLossless,
@@ -314,6 +316,38 @@ public enum SmokeTestRunner {
                             }
                         }
                     }
+
+                    let lsCtrl = LongshotSessionController(
+                        screen: screen,
+                        viewportTopDown: ASRect(x: 100, y: 100, width: 480, height: 320),
+                        initialCrop: rawBuf,
+                        config: defaultCfg,
+                        autoStartScroll: false
+                    )
+                    let lsPreviewRoot = ZStack {
+                        Color(white: 0.94)
+                        LongshotControlBarView(controller: lsCtrl)
+                            .padding(8)
+                    }
+                    let lsHost = NSHostingView(rootView: lsPreviewRoot)
+                    lsHost.frame = NSRect(x: 0, y: 0, width: 704, height: 70)
+                    lsHost.appearance = NSAppearance(named: .aqua)
+                    let offWin = NSWindow(
+                        contentRect: NSRect(x: -4000, y: -4000, width: 704, height: 70),
+                        styleMask: [.borderless],
+                        backing: .buffered,
+                        defer: false
+                    )
+                    offWin.appearance = NSAppearance(named: .aqua)
+                    offWin.contentView = lsHost
+                    lsHost.layoutSubtreeIfNeeded()
+                    if let rep = lsHost.bitmapImageRepForCachingDisplay(in: lsHost.bounds) {
+                        lsHost.cacheDisplay(in: lsHost.bounds, to: rep)
+                        if let png = rep.representation(using: .png, properties: [:]) {
+                            try? png.write(to: dirURL.appendingPathComponent("08_longshot_bar.png"))
+                        }
+                    }
+                    offWin.orderOut(nil)
                 }
 
                 return visibleAndPersistent && toolbarExactMatch && !coordinator.hasVisibleWindows && ended

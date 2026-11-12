@@ -459,6 +459,7 @@ public enum KeyCodeLabels {
 
 public struct HotkeyConfig: Codable, Equatable, Sendable {
     public var screenshot: HotkeyBinding
+    public var longshotCapture: HotkeyBinding
     public var ocrCapture: HotkeyBinding
     public var pin: HotkeyBinding
     public var pinBorderToggle: HotkeyBinding
@@ -468,6 +469,7 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
 
     public init(
         screenshot: HotkeyBinding = HotkeyBinding(keyCode: kVK_F1, modifiers: []),
+        longshotCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F4, modifiers: []),
         ocrCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F2, modifiers: []),
         pin: HotkeyBinding = HotkeyBinding(keyCode: kVK_F3, modifiers: []),
         pinBorderToggle: HotkeyBinding = HotkeyBinding(keyCode: kVK_F3, modifiers: [.control]),
@@ -476,6 +478,7 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
         ocr: HotkeyBinding = HotkeyBinding(keyCode: kVK_ANSI_T, modifiers: [])
     ) {
         self.screenshot = screenshot
+        self.longshotCapture = longshotCapture
         self.ocrCapture = ocrCapture
         self.pin = pin
         self.pinBorderToggle = pinBorderToggle
@@ -485,19 +488,67 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case screenshot, ocrCapture, pin, pinBorderToggle, recapture, longshot, ocr
+        case screenshot, longshotCapture, ocrCapture, pin, pinBorderToggle, recapture, longshot, ocr
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = HotkeyConfig()
-        self.screenshot = try c.decodeIfPresent(HotkeyBinding.self, forKey: .screenshot) ?? defaults.screenshot
-        self.ocrCapture = try c.decodeIfPresent(HotkeyBinding.self, forKey: .ocrCapture) ?? defaults.ocrCapture
-        self.pin = try c.decodeIfPresent(HotkeyBinding.self, forKey: .pin) ?? defaults.pin
-        self.pinBorderToggle = try c.decodeIfPresent(HotkeyBinding.self, forKey: .pinBorderToggle) ?? defaults.pinBorderToggle
+        let ss = try c.decodeIfPresent(HotkeyBinding.self, forKey: .screenshot) ?? defaults.screenshot
+        let oc = try c.decodeIfPresent(HotkeyBinding.self, forKey: .ocrCapture) ?? defaults.ocrCapture
+        let pn = try c.decodeIfPresent(HotkeyBinding.self, forKey: .pin) ?? defaults.pin
+        let pb = try c.decodeIfPresent(HotkeyBinding.self, forKey: .pinBorderToggle) ?? defaults.pinBorderToggle
+        self.screenshot = ss
+        self.ocrCapture = oc
+        self.pin = pn
+        self.pinBorderToggle = pb
+        if let decodedLS = try c.decodeIfPresent(HotkeyBinding.self, forKey: .longshotCapture) {
+            self.longshotCapture = decodedLS
+        } else {
+            let existingGlobals = [ss, oc, pn, pb]
+            self.longshotCapture = existingGlobals.contains(defaults.longshotCapture) ? .unbound : defaults.longshotCapture
+        }
         self.recapture = try c.decodeIfPresent(HotkeyBinding.self, forKey: .recapture) ?? defaults.recapture
         self.longshot = try c.decodeIfPresent(HotkeyBinding.self, forKey: .longshot) ?? defaults.longshot
         self.ocr = try c.decodeIfPresent(HotkeyBinding.self, forKey: .ocr) ?? defaults.ocr
+    }
+}
+
+public enum LongshotScrollSpeed: String, Codable, CaseIterable, Sendable {
+    case slow = "slow"
+    case normal = "normal"
+    case fast = "fast"
+
+    public var title: String {
+        switch self {
+        case .slow: return "慢"
+        case .normal: return "标准"
+        case .fast: return "快"
+        }
+    }
+
+    public var viewportStepFraction: Double {
+        switch self {
+        case .slow: return 0.20
+        case .normal: return 0.30
+        case .fast: return 0.40
+        }
+    }
+
+    public var settleMilliseconds: UInt64 {
+        switch self {
+        case .slow: return 190
+        case .normal: return 155
+        case .fast: return 130
+        }
+    }
+
+    public var next: LongshotScrollSpeed {
+        switch self {
+        case .slow: return .normal
+        case .normal: return .fast
+        case .fast: return .slow
+        }
     }
 }
 
@@ -723,6 +774,8 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var pngCompressionQuality: PngCompressionQualityPreset
     public var compressClipboardPng: Bool
     public var longshotMaxHeight: Int
+    public var longshotAutoScroll: Bool
+    public var longshotScrollSpeed: LongshotScrollSpeed
     public var autoCheckUpdate: Bool
     public var skippedVersion: String?
     public var ocr: OcrConfig
@@ -760,6 +813,8 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         pngCompressionQuality: PngCompressionQualityPreset = .visuallyLossless,
         compressClipboardPng: Bool = true,
         longshotMaxHeight: Int = 30000,
+        longshotAutoScroll: Bool = true,
+        longshotScrollSpeed: LongshotScrollSpeed = .normal,
         autoCheckUpdate: Bool = true,
         skippedVersion: String? = nil,
         ocr: OcrConfig = OcrConfig()
@@ -796,6 +851,8 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.pngCompressionQuality = pngCompressionQuality
         self.compressClipboardPng = compressClipboardPng
         self.longshotMaxHeight = max(2000, longshotMaxHeight)
+        self.longshotAutoScroll = longshotAutoScroll
+        self.longshotScrollSpeed = longshotScrollSpeed
         self.autoCheckUpdate = autoCheckUpdate
         self.skippedVersion = skippedVersion
         self.ocr = ocr
@@ -809,7 +866,8 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         case windowSnap, confirmCancel, showCompletionToast
         case toolbar, nameStyle, lastSaveFormat, lastSaveDirectory, askBeforeSave
         case smartPngCompression, pngCompressionQuality, compressClipboardPng
-        case longshotMaxHeight, autoCheckUpdate, skippedVersion, ocr
+        case longshotMaxHeight, longshotAutoScroll, longshotScrollSpeed
+        case autoCheckUpdate, skippedVersion, ocr
     }
 
     public init(from decoder: Decoder) throws {
@@ -859,6 +917,8 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.pngCompressionQuality = try c.decodeIfPresent(PngCompressionQualityPreset.self, forKey: .pngCompressionQuality) ?? .visuallyLossless
         self.compressClipboardPng = try c.decodeIfPresent(Bool.self, forKey: .compressClipboardPng) ?? true
         self.longshotMaxHeight = max(2000, min(100000, try c.decodeIfPresent(Int.self, forKey: .longshotMaxHeight) ?? d.longshotMaxHeight))
+        self.longshotAutoScroll = try c.decodeIfPresent(Bool.self, forKey: .longshotAutoScroll) ?? d.longshotAutoScroll
+        self.longshotScrollSpeed = try c.decodeIfPresent(LongshotScrollSpeed.self, forKey: .longshotScrollSpeed) ?? d.longshotScrollSpeed
         self.autoCheckUpdate = try c.decodeIfPresent(Bool.self, forKey: .autoCheckUpdate) ?? d.autoCheckUpdate
         self.skippedVersion = try c.decodeIfPresent(String.self, forKey: .skippedVersion)
         self.ocr = try c.decodeIfPresent(OcrConfig.self, forKey: .ocr) ?? d.ocr
@@ -917,6 +977,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         var conflicts: [String] = []
         let globalList: [(String, HotkeyBinding)] = [
             ("截图", hotkeys.screenshot),
+            ("页面长截图", hotkeys.longshotCapture),
             ("截图识字", hotkeys.ocrCapture),
             ("贴图", hotkeys.pin),
             ("贴图边框", hotkeys.pinBorderToggle),

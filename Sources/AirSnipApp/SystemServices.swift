@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Carbon
 import CoreGraphics
 import ImageIO
@@ -235,6 +236,83 @@ public enum ScreenCaptureService {
         } catch {
             return nil
         }
+    }
+}
+
+@MainActor
+public enum AccessibilityService {
+    public static func hasPermission() -> Bool {
+        AXIsProcessTrusted()
+    }
+
+    @discardableResult
+    public static func requestPermissionPrompt() -> Bool {
+        let key = "AXTrustedCheckOptionPrompt" as CFString
+        let opts = [key: true] as CFDictionary
+        return AXIsProcessTrustedWithOptions(opts)
+    }
+
+    public static func openSystemSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Converts a screen-local top-down point to Quartz global top-down coordinates (`(0,0)` = primary screen top-left).
+    public static func globalCGPoint(on screen: NSScreen, localTopDownPoint: ASPoint) -> CGPoint {
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? screen.frame.height
+        let screenTopDownX = Double(screen.frame.minX)
+        let screenTopDownY = Double(primaryHeight - screen.frame.maxY)
+        return CGPoint(
+            x: screenTopDownX + localTopDownPoint.x,
+            y: screenTopDownY + localTopDownPoint.y
+        )
+    }
+
+    /// Ensures the cursor sits inside the target viewport before emitting synthetic wheel events so WindowServer routes scrolling to the target view.
+    public static func moveCursorIntoViewportIfNeeded(screen: NSScreen, viewportTopDown: ASRect) {
+        let sFrame = screen.frame
+        let mouseAppKit = NSEvent.mouseLocation
+        let localX = Double(mouseAppKit.x - sFrame.minX)
+        let localY = Double(sFrame.maxY - mouseAppKit.y)
+
+        let insetX = min(28.0, viewportTopDown.width * 0.18)
+        let insetY = min(28.0, viewportTopDown.height * 0.18)
+        let inner = ASRect(
+            x: viewportTopDown.minX + insetX,
+            y: viewportTopDown.minY + insetY,
+            width: max(4.0, viewportTopDown.width - insetX * 2.0),
+            height: max(4.0, viewportTopDown.height - insetY * 2.0)
+        )
+        if sFrame.contains(mouseAppKit) && inner.contains(ASPoint(localX, localY)) {
+            return
+        }
+
+        let targetLocal = ASPoint(
+            viewportTopDown.midX,
+            viewportTopDown.minY + viewportTopDown.height * 0.46
+        )
+        let cgPt = globalCGPoint(on: screen, localTopDownPoint: targetLocal)
+        CGWarpMouseCursorPosition(cgPt)
+        CGAssociateMouseAndMouseCursorPosition(1)
+    }
+
+    /// Posts a continuous pixel-accurate downward scroll tick without trackpad momentum tail.
+    public static func postPixelScrollDown(at globalCGPoint: CGPoint, deltaPointsDown: Int) {
+        guard deltaPointsDown > 0,
+              let src = CGEventSource(stateID: .hidSystemState),
+              let ev = CGEvent(
+                  scrollWheelEvent2Source: src,
+                  units: .pixel,
+                  wheelCount: 1,
+                  wheel1: Int32(-deltaPointsDown),
+                  wheel2: 0,
+                  wheel3: 0
+              ) else {
+            return
+        }
+        ev.location = globalCGPoint
+        ev.post(tap: .cghidEventTap)
     }
 }
 
@@ -683,6 +761,7 @@ public final class GlobalHotkeyManager {
         case pin = 2
         case pinBorderToggle = 3
         case ocrCapture = 4
+        case longshotCapture = 5
     }
 
     private var eventHandlerRef: EventHandlerRef?
@@ -732,6 +811,7 @@ public final class GlobalHotkeyManager {
 
         let items: [(Action, String, HotkeyBinding)] = [
             (.screenshot, "截图", hotkeys.screenshot),
+            (.longshotCapture, "页面长截图", hotkeys.longshotCapture),
             (.ocrCapture, "截图识字", hotkeys.ocrCapture),
             (.pin, "贴图", hotkeys.pin),
             (.pinBorderToggle, "贴图边框", hotkeys.pinBorderToggle),

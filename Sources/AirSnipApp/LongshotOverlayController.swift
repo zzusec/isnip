@@ -19,14 +19,19 @@ public final class LongshotSessionController: ObservableObject {
     @Published public private(set) var pixelHeight: Int = 0
     @Published public private(set) var segmentCount: Int = 0
     @Published public private(set) var canUndo: Bool = false
-    @Published public private(set) var statusHint: String = "在选框内滚动拼接 · Enter 完成"
+    @Published public private(set) var statusHint: String = "Space 自动翻页 · 滚轮手动拼接 · Enter 完成"
     @Published public private(set) var thumbnailImage: CGImage?
     @Published public private(set) var headerFooterHint: String?
+    @Published public private(set) var isAutoScrolling: Bool = false
+    @Published public private(set) var needsAccessibilityAuth: Bool = false
+    @Published public private(set) var reachedBottom: Bool = false
+    @Published public private(set) var scrollSpeed: LongshotScrollSpeed
 
     private let screen: NSScreen
     private let viewportTopDown: ASRect
     private let backingScale: Double
     private var config: AirSnipConfig
+    private let autoStartRequested: Bool
 
     private var canvas: LongshotCanvas?
     private var borderWindow: NSPanel?
@@ -36,6 +41,13 @@ public final class LongshotSessionController: ObservableObject {
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
 
+    private var pendingInitialDelayMs: UInt64 = 0
+    private var pendingInitialWarp: Bool = false
+    private var consecutiveStillCount: Int = 0
+    private var adaptiveScale: Double = 1.0
+    private var goodStepStreak: Int = 0
+
+    public var onSpeedChanged: ((LongshotScrollSpeed) -> Void)?
     public var onFinishCopy: ((CGImage, Double) -> Void)?
     public var onFinishSave: ((CGImage, Double) -> Void)?
     public var onFinishEdit: ((CGImage, Double, NSScreen) -> Void)?
@@ -46,19 +58,22 @@ public final class LongshotSessionController: ObservableObject {
         screen: NSScreen,
         viewportTopDown: ASRect,
         initialCrop: PixelBufferRGBA,
-        config: AirSnipConfig
+        config: AirSnipConfig,
+        autoStartScroll: Bool = false
     ) {
         self.screen = screen
         self.viewportTopDown = viewportTopDown
         self.backingScale = Double(screen.backingScaleFactor)
         self.config = config
+        self.scrollSpeed = config.longshotScrollSpeed
+        self.autoStartRequested = autoStartScroll
         self.pixelWidth = initialCrop.width
         self.pixelHeight = initialCrop.height
 
         let stitchCanvas = LongshotCanvas(
             width: initialCrop.width,
             frameHeight: initialCrop.height,
-            params: LongshotParams(minRatio: 0.86, minFixedRows: 8),
+            params: LongshotParams(minRatio: 0.84, minFixedRows: 8),
             maxHeight: config.longshotMaxHeight
         )
         stitchCanvas.seed(initialCrop)
@@ -69,10 +84,20 @@ public final class LongshotSessionController: ObservableObject {
     public func start() {
         setupWindows()
         installKeyMonitors()
-        startCaptureLoop()
+        if autoStartRequested {
+            if AccessibilityService.hasPermission() {
+                beginAutoScrolling(initialDelayMs: 220)
+            } else {
+                needsAccessibilityAuth = true
+                _ = AccessibilityService.requestPermissionPrompt()
+                statusHint = "授权辅助功能可自动翻页（也可直接手动滚动）"
+            }
+        }
+        startSessionLoop()
     }
 
     public func stopAndCleanup() {
+        isAutoScrolling = false
         captureLoopTask?.cancel()
         captureLoopTask = nil
         if let g = globalKeyMonitor { NSEvent.removeMonitor(g); globalKeyMonitor = nil }
@@ -83,6 +108,62 @@ public final class LongshotSessionController: ObservableObject {
         borderWindow = nil
         previewWindow = nil
         controlWindow = nil
+    }
+
+    public func toggleAutoScroll() {
+        if isAutoScrolling {
+            pauseAutoScrolling()
+        } else {
+            beginAutoScrolling(initialDelayMs: 90)
+        }
+    }
+
+    public func beginAutoScrolling(initialDelayMs: UInt64 = 90) {
+        guard AccessibilityService.hasPermission() else {
+            needsAccessibilityAuth = true
+            isAutoScrolling = false
+            _ = AccessibilityService.requestPermissionPrompt()
+            statusHint = "请在系统设置中开启辅助功能以自动翻页"
+            return
+        }
+        needsAccessibilityAuth = false
+        reachedBottom = false
+        consecutiveStillCount = 0
+        adaptiveScale = 1.0
+        goodStepStreak = 0
+        pendingInitialDelayMs = initialDelayMs
+        pendingInitialWarp = true
+        isAutoScrolling = true
+        statusHint = segmentCount > 0
+            ? "自动翻页中（已拼 \(segmentCount) 段）· Space 暂停"
+            : "自动翻页中 · Space 暂停 · Enter 完成"
+    }
+
+    public func pauseAutoScrolling(customHint: String? = nil) {
+        isAutoScrolling = false
+        if let customHint {
+            statusHint = customHint
+        } else if segmentCount > 0 {
+            statusHint = "已暂停（\(segmentCount) 段）· Space 继续 · Enter 完成"
+        } else {
+            statusHint = "已暂停 · Space 自动翻页或手动滚轮"
+        }
+    }
+
+    public func setScrollSpeed(_ speed: LongshotScrollSpeed) {
+        guard scrollSpeed != speed else { return }
+        scrollSpeed = speed
+        config.longshotScrollSpeed = speed
+        onSpeedChanged?(speed)
+    }
+
+    public func cycleScrollSpeed() {
+        setScrollSpeed(scrollSpeed.next)
+    }
+
+    public func openAccessibilityAuthorization() {
+        _ = AccessibilityService.requestPermissionPrompt()
+        AccessibilityService.openSystemSettings()
     }
 
     private func setupWindows() {
@@ -123,7 +204,7 @@ public final class LongshotSessionController: ObservableObject {
         bWin.orderFrontRegardless()
         self.borderWindow = bWin
 
-        // 2. Side live thumbnail preview window (LNG-14: right side if >=130pt space, else left side)
+        // 2. Side live thumbnail preview window (right side if >=176pt space, else left side)
         let rightSpace = sFrame.maxX - vpAppKit.maxX
         let leftSpace = vpAppKit.minX - sFrame.minX
         let previewW: CGFloat = 156
@@ -155,8 +236,8 @@ public final class LongshotSessionController: ObservableObject {
         }
 
         // 3. Control bar window below (or above) viewport
-        let barW: CGFloat = 596
-        let barH: CGFloat = 52
+        let barW = min(max(560, sFrame.width - 24), 708)
+        let barH: CGFloat = 54
         let barX = max(sFrame.minX + 12, min(sFrame.maxX - barW - 12, vpAppKit.midX - barW * 0.5))
         let barY: CGFloat = (vpAppKit.minY - barH - 12 >= sFrame.minY + 8)
             ? (vpAppKit.minY - barH - 10)
@@ -184,7 +265,11 @@ public final class LongshotSessionController: ObservableObject {
             guard let self else { return false }
             let flags = ev.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let cmdOrCtrl = flags.contains(.command) || flags.contains(.control)
+            let anyMod = cmdOrCtrl || flags.contains(.option) || flags.contains(.shift)
             switch Int(ev.keyCode) {
+            case kVK_Space where !anyMod:
+                self.toggleAutoScroll()
+                return true
             case kVK_Return, kVK_ANSI_KeypadEnter:
                 self.finishAndCopy()
                 return true
@@ -215,7 +300,7 @@ public final class LongshotSessionController: ObservableObject {
         }
     }
 
-    private func startCaptureLoop() {
+    private func startSessionLoop() {
         var ownWinIDs = Set<Int>()
         if let id = borderWindow?.windowNumber, id > 0 { ownWinIDs.insert(id) }
         if let id = previewWindow?.windowNumber, id > 0 { ownWinIDs.insert(id) }
@@ -226,29 +311,146 @@ public final class LongshotSessionController: ObservableObject {
 
         captureLoopTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 115_000_000)
-                guard !Task.isCancelled, let self else { break }
-                guard let frame = await ScreenCaptureService.captureDisplayRegion(
-                    screen: targetScreen,
-                    localTopDownRect: targetRect,
-                    excludingWindowNumbers: ownWinIDs
-                ) else {
-                    continue
+                guard let self else { break }
+
+                if self.needsAccessibilityAuth && AccessibilityService.hasPermission() {
+                    self.needsAccessibilityAuth = false
+                    if self.autoStartRequested && self.segmentCount == 0 && !self.isAutoScrolling {
+                        self.beginAutoScrolling(initialDelayMs: 120)
+                    } else if !self.isAutoScrolling {
+                        self.statusHint = "辅助功能已就绪 · Space 自动翻页"
+                    }
                 }
-                self.processFrame(frame)
+
+                if self.isAutoScrolling {
+                    if self.pendingInitialDelayMs > 0 {
+                        let delayNs = self.pendingInitialDelayMs * 1_000_000
+                        self.pendingInitialDelayMs = 0
+                        try? await Task.sleep(nanoseconds: delayNs)
+                        guard !Task.isCancelled, self.isAutoScrolling else { continue }
+                    }
+
+                    if self.pendingInitialWarp {
+                        self.pendingInitialWarp = false
+                        AccessibilityService.moveCursorIntoViewportIfNeeded(
+                            screen: targetScreen,
+                            viewportTopDown: targetRect
+                        )
+                        try? await Task.sleep(nanoseconds: 55_000_000)
+                        guard !Task.isCancelled, self.isAutoScrolling else { continue }
+                    }
+
+                    // Hold scrolling steady while the user hovers over the control bar to click Pause / Finish / Save
+                    if let cWin = self.controlWindow, cWin.frame.contains(NSEvent.mouseLocation) {
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                        continue
+                    }
+
+                    let probeBoost = (self.consecutiveStillCount == 1) ? 1.25 : 1.0
+                    let fraction = min(0.46, self.scrollSpeed.viewportStepFraction * self.adaptiveScale * probeBoost)
+                    let totalStepPt = max(36, min(280, Int((targetRect.height * fraction).rounded())))
+                    let tickCount = 6
+                    let baseTick = totalStepPt / tickCount
+                    let remTicks = totalStepPt % tickCount
+                    let scrollAnchor = AccessibilityService.globalCGPoint(
+                        on: targetScreen,
+                        localTopDownPoint: ASPoint(
+                            targetRect.midX,
+                            targetRect.minY + targetRect.height * 0.46
+                        )
+                    )
+
+                    for t in 0..<tickCount {
+                        guard !Task.isCancelled, self.isAutoScrolling else { break }
+                        let delta = baseTick + (t < remTicks ? 1 : 0)
+                        if delta > 0 {
+                            AccessibilityService.postPixelScrollDown(at: scrollAnchor, deltaPointsDown: delta)
+                        }
+                        if t + 1 < tickCount {
+                            try? await Task.sleep(nanoseconds: 15_000_000)
+                        }
+                    }
+
+                    guard !Task.isCancelled, self.isAutoScrolling else { continue }
+                    try? await Task.sleep(nanoseconds: self.scrollSpeed.settleMilliseconds * 1_000_000)
+                    guard !Task.isCancelled, self.isAutoScrolling else { continue }
+
+                    guard let frame = await ScreenCaptureService.captureDisplayRegion(
+                        screen: targetScreen,
+                        localTopDownRect: targetRect,
+                        excludingWindowNumbers: ownWinIDs
+                    ) else {
+                        continue
+                    }
+                    self.handleAutoScrollFrame(frame, screen: targetScreen, viewport: targetRect)
+                } else {
+                    try? await Task.sleep(nanoseconds: 115_000_000)
+                    guard !Task.isCancelled, !self.isAutoScrolling else { continue }
+                    guard let frame = await ScreenCaptureService.captureDisplayRegion(
+                        screen: targetScreen,
+                        localTopDownRect: targetRect,
+                        excludingWindowNumbers: ownWinIDs
+                    ) else {
+                        continue
+                    }
+                    _ = self.processFrame(frame, fromAutoScroll: false)
+                }
             }
         }
     }
 
-    private func processFrame(_ frame: PixelBufferRGBA) {
-        guard let canvas else { return }
+    private func handleAutoScrollFrame(_ frame: PixelBufferRGBA, screen: NSScreen, viewport: ASRect) {
+        let step = processFrame(frame, fromAutoScroll: true)
+        switch step {
+        case .appended:
+            consecutiveStillCount = 0
+            reachedBottom = false
+            goodStepStreak += 1
+            if goodStepStreak >= 2 {
+                adaptiveScale = 1.0
+            }
+            statusHint = "自动翻页中（已拼 \(segmentCount) 段）· Space 暂停"
+
+        case .still:
+            consecutiveStillCount += 1
+            if segmentCount == 0 && consecutiveStillCount == 1 {
+                AccessibilityService.moveCursorIntoViewportIfNeeded(screen: screen, viewportTopDown: viewport)
+            }
+            let stopThreshold = segmentCount > 0 ? 2 : 4
+            if consecutiveStillCount >= stopThreshold {
+                isAutoScrolling = false
+                if segmentCount > 0 {
+                    reachedBottom = true
+                    statusHint = "已自动到底（共 \(segmentCount) 段）· Enter 完成"
+                } else {
+                    statusHint = "页面已到底或不可滚动 · Enter 完成"
+                }
+            }
+
+        case .failed:
+            goodStepStreak = 0
+            adaptiveScale = max(0.45, adaptiveScale * 0.65)
+            statusHint = "正在自适应调速拼接 · Space 暂停"
+
+        case .limitReached:
+            isAutoScrolling = false
+            statusHint = "已达高度上限 · Enter 完成"
+        }
+    }
+
+    @discardableResult
+    private func processFrame(_ frame: PixelBufferRGBA, fromAutoScroll: Bool) -> LongshotStepResult {
+        guard let canvas else { return .still }
         let step = canvas.push(frame)
         switch step {
         case .appended:
             pixelHeight = canvas.totalHeight
             segmentCount = canvas.segmentCount
             canUndo = canvas.canUndo
-            statusHint = "已拼接 \(segmentCount) 段 · Enter 完成"
+            reachedBottom = false
+            if !fromAutoScroll {
+                statusHint = "已拼接 \(segmentCount) 段 · Enter 完成"
+            }
             if canvas.headerHeight > 0 || canvas.footerHeight > 0 {
                 headerFooterHint = "已去页眉页脚"
             }
@@ -256,19 +458,28 @@ public final class LongshotSessionController: ObservableObject {
         case .still:
             break
         case .failed:
-            statusHint = "滚动过快，请慢速滚动（⌘Z 撤销）"
+            if !fromAutoScroll {
+                statusHint = "滚动过快，请慢速滚动（⌘Z 撤销）"
+            }
         case .limitReached:
-            statusHint = "已达高度上限 · Enter 完成"
+            if !fromAutoScroll {
+                statusHint = "已达高度上限 · Enter 完成"
+            }
         }
+        return step
     }
 
     public func undoLastSegment() {
+        if isAutoScrolling {
+            isAutoScrolling = false
+        }
         guard let canvas, canvas.undoLast() else { return }
+        reachedBottom = false
         pixelHeight = canvas.totalHeight
         segmentCount = canvas.segmentCount
         canUndo = canvas.canUndo
         thumbnailImage = canvas.makeThumbnail(maxWidth: 160, maxHeight: 420)
-        statusHint = "已撤销上一段"
+        statusHint = "已撤销上一段 · Space 继续翻页"
     }
 
     public func finishAndCopy() {
@@ -353,9 +564,14 @@ private struct LongshotPreviewCard: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            Text("预览")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(controller.isAutoScrolling ? Color.accentColor : Color.green)
+                    .frame(width: 6, height: 6)
+                Text(controller.isAutoScrolling ? "自动拼接" : "预览")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
 
             Spacer(minLength: 0)
 
@@ -386,15 +602,35 @@ private struct LongshotPreviewCard: View {
     }
 }
 
-private struct LongshotControlBarView: View {
+struct LongshotControlBarView: View {
     @ObservedObject var controller: LongshotSessionController
 
+    private var statusDotColor: Color {
+        if controller.needsAccessibilityAuth {
+            return .orange
+        }
+        if controller.isAutoScrolling {
+            return .accentColor
+        }
+        return .green
+    }
+
+    private var autoScrollButtonLabel: String {
+        if controller.isAutoScrolling {
+            return "暂停"
+        }
+        if controller.segmentCount > 0 && !controller.reachedBottom {
+            return "继续翻页"
+        }
+        return "自动翻页"
+    }
+
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(Color.green)
+                        .fill(statusDotColor)
                         .frame(width: 7, height: 7)
                     Text("\(controller.pixelWidth) × \(controller.pixelHeight) px")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
@@ -414,6 +650,44 @@ private struct LongshotControlBarView: View {
 
             Spacer(minLength: 4)
 
+            if controller.needsAccessibilityAuth {
+                Button("授权") {
+                    controller.openAccessibilityAuthorization()
+                }
+                .buttonStyle(.bordered)
+                .tint(.orange)
+                .controlSize(.small)
+                .help("打开辅助功能权限设置")
+            }
+
+            Button {
+                controller.toggleAutoScroll()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: controller.isAutoScrolling ? "pause.fill" : "play.fill")
+                        .font(.system(size: 10, weight: .bold))
+                    Text(autoScrollButtonLabel)
+                }
+            }
+            .buttonStyle(.bordered)
+            .tint(controller.isAutoScrolling ? .accentColor : nil)
+            .controlSize(.small)
+            .help("自动翻页 / 暂停 (Space)")
+
+            Button {
+                controller.cycleScrollSpeed()
+            } label: {
+                Text(controller.scrollSpeed.title)
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(minWidth: 26)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("翻页速度：\(controller.scrollSpeed.title)（点击切换）")
+
+            Divider()
+                .frame(height: 18)
+
             Button {
                 controller.undoLastSegment()
             } label: {
@@ -423,7 +697,7 @@ private struct LongshotControlBarView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(!controller.canUndo)
-            .help("撤销 (⌘Z)")
+            .help("撤销上一段 (⌘Z)")
 
             Button("OCR") {
                 controller.finishAndOCR()
@@ -451,7 +725,7 @@ private struct LongshotControlBarView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            .help("完成 (Enter)")
+            .help("完成并复制 (Enter)")
 
             Button {
                 controller.cancel()
@@ -460,7 +734,7 @@ private struct LongshotControlBarView: View {
                     .font(.system(size: 11, weight: .semibold))
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 3)
             .help("取消 (Esc)")
         }
         .padding(.horizontal, 12)

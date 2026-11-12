@@ -1,4 +1,5 @@
 import XCTest
+import Carbon
 import CoreGraphics
 import ImageIO
 @testable import AirSnipCore
@@ -423,5 +424,117 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertTrue(reloaded.defaultFontItalic)
         XCTAssertEqual(reloaded.defaultNumberFontSize, 26.0)
         XCTAssertEqual(reloaded.activeColorIndex, 4)
+    }
+
+    func testLongshotAutoPagingSparseWebpageScrollbarAndFixedSidebar() {
+        // 1. Sparse 90%-white webpage with a moving right-edge macOS scrollbar thumb + bottom detection
+        let w = 240
+        let fh = 120
+        let pageH = 320
+        var page = [UInt8](repeating: 255, count: w * pageH * 4)
+        // Render sparse dark text paragraphs (only ~12% of rows have text; 88% pure white)
+        for block in stride(from: 18, to: pageH - 16, by: 38) {
+            for row in 0..<5 {
+                let y = block + row
+                for x in 24..<(w - 32) {
+                    if ((x + block * 7 + row * 13) % 5) != 0 {
+                        let o = (y * w + x) * 4
+                        page[o] = UInt8((30 + block) & 0xFF)
+                        page[o + 1] = UInt8((40 + row * 25) & 0xFF)
+                        page[o + 2] = UInt8((60 + (x % 90)) & 0xFF)
+                        page[o + 3] = 255
+                    }
+                }
+            }
+        }
+
+        func renderWebFrame(scrollY: Int) -> PixelBufferRGBA {
+            let clampedY = max(0, min(pageH - fh, scrollY))
+            var frame = Array(page[(clampedY * w * 4)..<((clampedY + fh) * w * 4)])
+            // Overlay a moving scrollbar thumb on the rightmost 14px (moves opposite to content!)
+            let thumbTop = (clampedY * (fh - 34)) / max(1, pageH - fh)
+            for y in thumbTop..<(thumbTop + 34) {
+                for x in (w - 14)..<(w - 3) {
+                    let o = (y * w + x) * 4
+                    frame[o] = 120; frame[o + 1] = 124; frame[o + 2] = 130; frame[o + 3] = 255
+                }
+            }
+            return PixelBufferRGBA(width: w, height: fh, rgba: frame)
+        }
+
+        let canvas = LongshotCanvas(width: w, frameHeight: fh, params: LongshotParams(minRatio: 0.84, minFixedRows: 8))
+        canvas.seed(renderWebFrame(scrollY: 0))
+        XCTAssertEqual(canvas.push(renderWebFrame(scrollY: 36)), .appended(offset: 36, rows: 36))
+        XCTAssertEqual(canvas.push(renderWebFrame(scrollY: 72)), .appended(offset: 36, rows: 36))
+        XCTAssertEqual(canvas.push(renderWebFrame(scrollY: 108)), .appended(offset: 36, rows: 36))
+        XCTAssertEqual(canvas.push(renderWebFrame(scrollY: 144)), .appended(offset: 36, rows: 36))
+        XCTAssertEqual(canvas.push(renderWebFrame(scrollY: 180)), .appended(offset: 36, rows: 36))
+        XCTAssertEqual(canvas.push(renderWebFrame(scrollY: 200)), .appended(offset: 20, rows: 20))
+        // Bottom reached -> subsequent auto-scroll ticks yield `.still`
+        XCTAssertEqual(canvas.push(renderWebFrame(scrollY: 200)), .still)
+        XCTAssertEqual(canvas.push(renderWebFrame(scrollY: 200)), .still)
+        XCTAssertEqual(canvas.headerHeight, 0)
+        XCTAssertEqual(canvas.footerHeight, 0)
+        XCTAssertEqual(canvas.totalHeight, pageH)
+
+        // 2. Webpage with fixed left sidebar (0..<52 static) + scrolling article on right (52..<240)
+        func renderSidebarFrame(scrollY: Int) -> PixelBufferRGBA {
+            var buf = [UInt8](repeating: 255, count: w * 100 * 4)
+            for y in 0..<100 {
+                for x in 0..<w {
+                    let dst = (y * w + x) * 4
+                    if x < 52 {
+                        // Static left navigation sidebar with distinct per-row items
+                        buf[dst] = UInt8((y * 9) & 0xFF)
+                        buf[dst + 1] = UInt8((40 + y * 5) & 0xFF)
+                        buf[dst + 2] = 95
+                        buf[dst + 3] = 255
+                    } else {
+                        let sy = scrollY + y
+                        buf[dst] = UInt8((sy * 7) & 0xFF)
+                        buf[dst + 1] = UInt8((x * 3 + sy * 11) & 0xFF)
+                        buf[dst + 2] = UInt8((sy * 17) & 0xFF)
+                        buf[dst + 3] = 255
+                    }
+                }
+            }
+            return PixelBufferRGBA(width: w, height: 100, rgba: buf)
+        }
+
+        let sidebarCanvas = LongshotCanvas(width: w, frameHeight: 100, params: LongshotParams(minRatio: 0.84, minFixedRows: 8))
+        sidebarCanvas.seed(renderSidebarFrame(scrollY: 0))
+        XCTAssertEqual(sidebarCanvas.push(renderSidebarFrame(scrollY: 28)), .appended(offset: 28, rows: 28))
+        XCTAssertEqual(sidebarCanvas.push(renderSidebarFrame(scrollY: 58)), .appended(offset: 30, rows: 30))
+        XCTAssertEqual(sidebarCanvas.totalHeight, 158)
+    }
+
+    func testLongshotAutoScrollConfigAndConflictFreeMigration() throws {
+        let cfg = AirSnipConfig()
+        XCTAssertTrue(cfg.longshotAutoScroll)
+        XCTAssertEqual(cfg.longshotScrollSpeed, .normal)
+        XCTAssertEqual(cfg.hotkeys.longshotCapture, HotkeyBinding(keyCode: kVK_F4, modifiers: []))
+        XCTAssertTrue(cfg.hotkeyConflicts().isEmpty)
+
+        // Legacy config where user had already bound F4 to `screenshot` -> `longshotCapture` falls back to `.unbound` cleanly
+        let legacyConflictJSON = Data(#"""
+        {
+          "hotkeys": {
+            "screenshot": { "keyCode": 118, "modifiers": 0 }
+          }
+        }
+        """#.utf8)
+        let migrated = try JSONDecoder().decode(AirSnipConfig.self, from: legacyConflictJSON)
+        XCTAssertEqual(migrated.hotkeys.screenshot.keyCode, kVK_F4)
+        XCTAssertTrue(migrated.hotkeys.longshotCapture.isUnbound)
+        XCTAssertTrue(migrated.hotkeyConflicts().isEmpty)
+
+        // Persisting auto-scroll speed & toggle
+        var custom = AirSnipConfig()
+        custom.longshotAutoScroll = false
+        custom.longshotScrollSpeed = .fast
+        let data = try JSONEncoder().encode(custom)
+        let decoded = try JSONDecoder().decode(AirSnipConfig.self, from: data)
+        XCTAssertFalse(decoded.longshotAutoScroll)
+        XCTAssertEqual(decoded.longshotScrollSpeed, .fast)
     }
 }

@@ -80,12 +80,18 @@ public final class CaptureSessionCoordinator {
     public enum SessionMode {
         case normalCapture
         case directOCRCapture
+        case directLongshotCapture
         case inlinePinEdit(PinWindowController)
         case standaloneImageEdit(CGImage, Double, NSScreen)
     }
 
     public var isDirectOCRCapture: Bool {
         if case .directOCRCapture = mode { return true }
+        return false
+    }
+
+    public var isDirectLongshotCapture: Bool {
+        if case .directLongshotCapture = mode { return true }
         return false
     }
 
@@ -98,7 +104,7 @@ public final class CaptureSessionCoordinator {
     public var onCompleteSave: ((CGImage, Double, Bool, inout AirSnipConfig) -> Bool)?
     public var onCompletePin: ((CGImage, Double, CGPoint?) -> Void)?
     public var onStartOCR: ((CGImage, NSPoint?) -> Void)?
-    public var onStartLongshot: ((NSScreen, ASRect, PixelBufferRGBA) -> Void)?
+    public var onStartLongshot: ((NSScreen, ASRect, PixelBufferRGBA, Bool) -> Void)?
     public var onConfigMutated: ((AirSnipConfig) -> Void)?
     public var onSessionEnded: (() -> Void)?
 
@@ -376,9 +382,14 @@ public final class CaptureSessionCoordinator {
         onSessionEnded?()
     }
 
-    func finishIntoLongshot(screen: NSScreen, viewportTopDown: ASRect, initialCrop: PixelBufferRGBA) {
+    func finishIntoLongshot(
+        screen: NSScreen,
+        viewportTopDown: ASRect,
+        initialCrop: PixelBufferRGBA,
+        forceAutoScroll: Bool = false
+    ) {
         closeAllWindows()
-        onStartLongshot?(screen, viewportTopDown, initialCrop)
+        onStartLongshot?(screen, viewportTopDown, initialCrop, forceAutoScroll)
         onSessionEnded?()
     }
 
@@ -1011,6 +1022,8 @@ final class OverlayCanvasView: NSView {
 
             if coordinator?.isDirectOCRCapture == true, cancelConfirmBanner == nil {
                 drawCancelConfirmBanner(in: ctx, message: "框选或点击窗口识字 · Esc 取消")
+            } else if coordinator?.isDirectLongshotCapture == true, cancelConfirmBanner == nil {
+                drawCancelConfirmBanner(in: ctx, message: "框选滚动区域或点击窗口自动翻页长截图 · Esc 取消")
             }
         }
 
@@ -3106,6 +3119,16 @@ final class OverlayCanvasView: NSView {
                 triggerOCR()
                 return
             }
+            if coordinator?.isDirectLongshotCapture == true, let sel = selection {
+                dragOp = .none
+                if sel.width >= 24 && sel.height >= 24 {
+                    triggerLongshot(forceAutoScroll: true)
+                    return
+                } else {
+                    selection = nil
+                    ToastHUD.show("选区过小，请框选页面滚动区域")
+                }
+            }
             needsDisplay = true
 
         case .resizingSelection:
@@ -3766,7 +3789,7 @@ final class OverlayCanvasView: NSView {
         coordinator?.finishWithOCR(rawImage: raw, anchorScreenPoint: centerScreen)
     }
 
-    private func triggerLongshot() {
+    private func triggerLongshot(forceAutoScroll: Bool = false) {
         guard let sel = selection, sel.width >= 24 && sel.height >= 24 else {
             ToastHUD.show("选区过小")
             return
@@ -3778,7 +3801,12 @@ final class OverlayCanvasView: NSView {
             height: max(1, Int((sel.height * snapshot.backingScale).rounded()))
         )
         guard let initialCrop = snapshot.rawBuffer.cropped(to: pxRect) else { return }
-        coordinator?.finishIntoLongshot(screen: snapshot.screen, viewportTopDown: sel, initialCrop: initialCrop)
+        coordinator?.finishIntoLongshot(
+            screen: snapshot.screen,
+            viewportTopDown: sel,
+            initialCrop: initialCrop,
+            forceAutoScroll: forceAutoScroll
+        )
     }
 
     private func attemptCancel() {

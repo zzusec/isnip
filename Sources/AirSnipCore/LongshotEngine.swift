@@ -37,27 +37,76 @@ public enum LongshotStitcher {
             var v: UInt64 = 0
             let base = c * 8
             for b in 0..<8 {
-                // Quantize minor 1-bit compression/compositor noise by masking LSB (& 0xFE) for resilient matching
-                v |= UInt64(bytes[base + b] & 0xFE) << (b * 8)
+                // Quantize minor 2-bit compositor/color-management noise (& 0xFC) for resilient matching
+                v |= UInt64(bytes[base + b] & 0xFC) << (b * 8)
             }
             h = (h ^ v) &* prime
         }
         for i in (chunks * 8)..<count {
-            h = (h ^ UInt64(bytes[i] & 0xFE)) &* prime
+            h = (h ^ UInt64(bytes[i] & 0xFC)) &* prime
         }
         return h
     }
 
-    public static func rowHashes(rgba: [UInt8], width: Int, height: Int) -> [UInt64] {
+    public static func defaultHorizontalMargin(forWidth width: Int) -> Int {
+        width >= 96 ? min(44, width / 12) : 0
+    }
+
+    public static func rowHashes(
+        rgba: [UInt8],
+        width: Int,
+        height: Int,
+        startX: Int? = nil,
+        endX: Int? = nil
+    ) -> [UInt64] {
+        guard width > 0, height > 0 else { return [] }
         let stride = width * 4
+        let margin = defaultHorizontalMargin(forWidth: width)
+        let x0 = max(0, min(width - 1, startX ?? margin))
+        let x1 = max(x0 + 1, min(width, endX ?? (width - margin)))
+        let byteOffset = x0 * 4
+        let byteCount = (x1 - x0) * 4
+
         var result = [UInt64](repeating: 0, count: height)
         rgba.withUnsafeBufferPointer { ptr in
             guard let base = ptr.baseAddress else { return }
             for y in 0..<height {
-                result[y] = rowHash(base.advanced(by: y * stride), count: stride)
+                result[y] = rowHash(base.advanced(by: y * stride + byteOffset), count: byteCount)
             }
         }
         return result
+    }
+
+    private static func hasVisualStructure(
+        rgba: [UInt8],
+        width: Int,
+        startRow: Int,
+        rowCount: Int,
+        startX: Int,
+        endX: Int
+    ) -> Bool {
+        guard rowCount > 0, endX > startX else { return false }
+        let stride = width * 4
+        let firstIdx = startRow * stride + startX * 4
+        guard firstIdx + 2 < rgba.count else { return false }
+        let r0 = Int(rgba[firstIdx])
+        let g0 = Int(rgba[firstIdx + 1])
+        let b0 = Int(rgba[firstIdx + 2])
+
+        let xStep = max(1, (endX - startX) / 24)
+        let yStep = max(1, rowCount / 12)
+        for y in Swift.stride(from: startRow, to: startRow + rowCount, by: yStep) {
+            let rowBase = y * stride
+            for x in Swift.stride(from: startX, to: endX, by: xStep) {
+                let o = rowBase + x * 4
+                if abs(Int(rgba[o]) - r0) > 6
+                    || abs(Int(rgba[o + 1]) - g0) > 6
+                    || abs(Int(rgba[o + 2]) - b0) > 6 {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     public static func fixedRegions(
@@ -67,25 +116,32 @@ public enum LongshotStitcher {
         height: Int,
         params: LongshotParams
     ) -> (top: Int, bottom: Int) {
-        let ph = rowHashes(rgba: prev, width: width, height: height)
-        let nh = rowHashes(rgba: next, width: width, height: height)
+        let margin = defaultHorizontalMargin(forWidth: width)
+        let x0 = max(0, min(width - 1, margin))
+        let x1 = max(x0 + 1, min(width, width - margin))
+        let ph = rowHashes(rgba: prev, width: width, height: height, startX: x0, endX: x1)
+        let nh = rowHashes(rgba: next, width: width, height: height, startX: x0, endX: x1)
 
+        let maxTop = max(params.minFixedRows, (height * 40) / 100)
         var top = 0
-        while top < height && ph[top] == nh[top] {
+        while top < min(height, maxTop) && ph[top] == nh[top] {
             top += 1
         }
-        if top < params.minFixedRows {
+        if top < params.minFixedRows
+            || !hasVisualStructure(rgba: prev, width: width, startRow: 0, rowCount: top, startX: x0, endX: x1) {
             top = 0
         }
 
+        let maxBottom = max(params.minFixedRows, (height * 35) / 100)
         var bottom = 0
-        while bottom < height && ph[height - 1 - bottom] == nh[height - 1 - bottom] {
+        while bottom < min(height, maxBottom) && ph[height - 1 - bottom] == nh[height - 1 - bottom] {
             bottom += 1
         }
         if top + bottom > height {
             bottom = height - top
         }
-        if bottom < params.minFixedRows {
+        if bottom < params.minFixedRows
+            || !hasVisualStructure(rgba: prev, width: width, startRow: height - bottom, rowCount: bottom, startX: x0, endX: x1) {
             bottom = 0
         }
         return (top, bottom)
@@ -102,64 +158,156 @@ public enum LongshotStitcher {
     ) -> LongshotMatch {
         let ph = rowHashes(rgba: prev, width: width, height: height)
         let nh = rowHashes(rgba: next, width: width, height: height)
+        let primary = locateWithHashes(
+            ph: ph,
+            nh: nh,
+            height: height,
+            fixedTop: fixedTop,
+            fixedBottom: fixedBottom,
+            params: params
+        )
+        if primary.confident || width < 160 {
+            return primary
+        }
+
+        // Fallback for pages with fixed left/right navigation sidebars: match center 50% content column
+        let cx0 = width / 4
+        let cx1 = (width * 3) / 4
+        let cph = rowHashes(rgba: prev, width: width, height: height, startX: cx0, endX: cx1)
+        let cnh = rowHashes(rgba: next, width: width, height: height, startX: cx0, endX: cx1)
+        let centerMatch = locateWithHashes(
+            ph: cph,
+            nh: cnh,
+            height: height,
+            fixedTop: fixedTop,
+            fixedBottom: fixedBottom,
+            params: params
+        )
+        return centerMatch.confident ? centerMatch : primary
+    }
+
+    private static func locateWithHashes(
+        ph: [UInt64],
+        nh: [UInt64],
+        height: Int,
+        fixedTop: Int,
+        fixedBottom: Int,
+        params: LongshotParams
+    ) -> LongshotMatch {
         let ct = fixedTop
         let contentH = max(0, height - fixedTop - fixedBottom)
-        if contentH < 8 {
+        if contentH < 8 || ph.count < height || nh.count < height {
             return LongshotMatch(offset: 0, startRow: height, endRow: height, confident: false)
         }
         let maxShift = max(1, (contentH * 2) / 3)
 
-        var same = 0
-        for i in 0..<contentH where ph[ct + i] == nh[ct + i] {
-            same += 1
+        var sameTotal = 0
+        var featureCount = 0
+        var featureSame = 0
+        for i in 0..<contentH {
+            let idx = ct + i
+            let eq = (ph[idx] == nh[idx])
+            if eq { sameTotal += 1 }
+            if i > 0 && (ph[idx] != ph[idx - 1] || nh[idx] != nh[idx - 1]) {
+                featureCount += 1
+                if eq { featureSame += 1 }
+            }
         }
-        if Double(same) / Double(contentH) >= params.minRatio {
+        let totalZeroRatio = Double(sameTotal) / Double(contentH)
+        let minZeroFeatureRatio = max(0.75, params.minRatio - 0.08)
+        let zeroFeaturesAgree = (featureCount == 0) || (Double(featureSame) / Double(featureCount) >= minZeroFeatureRatio)
+        if totalZeroRatio >= params.minRatio && zeroFeaturesAgree {
             return LongshotMatch(offset: 0, startRow: height, endRow: height, confident: true)
         }
 
-        let down = minConsistentShift(ph: ph, nh: nh, ct: ct, ch: contentH, maxShift: maxShift, minRatio: params.minRatio, up: false)
-        let up = minConsistentShift(ph: ph, nh: nh, ct: ct, ch: contentH, maxShift: maxShift, minRatio: params.minRatio, up: true)
+        let down = bestConsistentShift(
+            ph: ph,
+            nh: nh,
+            ct: ct,
+            ch: contentH,
+            maxShift: maxShift,
+            minRatio: params.minRatio,
+            frameHasFeatures: featureCount > 0,
+            up: false
+        )
+        let up = bestConsistentShift(
+            ph: ph,
+            nh: nh,
+            ct: ct,
+            ch: contentH,
+            maxShift: maxShift,
+            minRatio: params.minRatio,
+            frameHasFeatures: featureCount > 0,
+            up: true
+        )
 
         switch (down, up) {
         case (nil, nil):
             return LongshotMatch(offset: 0, startRow: height, endRow: height, confident: false)
-        case (let s?, nil):
-            return LongshotMatch(offset: s, startRow: ct + contentH - s, endRow: ct + contentH, confident: true)
-        case (nil, let s?):
-            return LongshotMatch(offset: -s, startRow: ct, endRow: ct + s, confident: true)
-        case (let sd?, let su?):
-            if sd <= su {
-                return LongshotMatch(offset: sd, startRow: ct + contentH - sd, endRow: ct + contentH, confident: true)
+        case (let d?, nil):
+            return LongshotMatch(offset: d.shift, startRow: ct + contentH - d.shift, endRow: ct + contentH, confident: true)
+        case (nil, let u?):
+            return LongshotMatch(offset: -u.shift, startRow: ct, endRow: ct + u.shift, confident: true)
+        case (let d?, let u?):
+            if d.score > u.score + 0.02 || (abs(d.score - u.score) <= 0.02 && d.shift <= u.shift) {
+                return LongshotMatch(offset: d.shift, startRow: ct + contentH - d.shift, endRow: ct + contentH, confident: true)
             } else {
-                return LongshotMatch(offset: -su, startRow: ct, endRow: ct + su, confident: true)
+                return LongshotMatch(offset: -u.shift, startRow: ct, endRow: ct + u.shift, confident: true)
             }
         }
     }
 
-    private static func minConsistentShift(
+    private static func bestConsistentShift(
         ph: [UInt64],
         nh: [UInt64],
         ct: Int,
         ch: Int,
         maxShift: Int,
         minRatio: Double,
+        frameHasFeatures: Bool,
         up: Bool
-    ) -> Int? {
+    ) -> (shift: Int, score: Double)? {
+        let minFeatureRatio = max(0.70, minRatio - 0.14)
+        var best: (shift: Int, score: Double)?
+
         for s in 1...maxShift {
             let overlap = ch - s
             if overlap < 6 { continue }
             var matches = 0
+            var featTotal = 0
+            var featMatches = 0
             for i in 0..<overlap {
-                let equal = up
-                    ? (ph[ct + i] == nh[ct + i + s])
-                    : (ph[ct + i + s] == nh[ct + i])
+                let pIdx = up ? (ct + i) : (ct + i + s)
+                let nIdx = up ? (ct + i + s) : (ct + i)
+                let equal = (ph[pIdx] == nh[nIdx])
                 if equal { matches += 1 }
+                if i > 0 && (ph[pIdx] != ph[pIdx - 1] || nh[nIdx] != nh[nIdx - 1]) {
+                    featTotal += 1
+                    if equal { featMatches += 1 }
+                }
             }
-            if Double(matches) / Double(overlap) >= minRatio {
-                return s
+            let totalRatio = Double(matches) / Double(overlap)
+            if totalRatio < minRatio { continue }
+
+            let score: Double
+            if featTotal > 0 {
+                let featRatio = Double(featMatches) / Double(featTotal)
+                if featRatio < minFeatureRatio { continue }
+                score = featRatio * 0.72 + totalRatio * 0.28
+            } else {
+                if frameHasFeatures { continue }
+                score = totalRatio
+            }
+
+            if let current = best {
+                if score > current.score + 0.008 {
+                    best = (s, score)
+                }
+            } else {
+                best = (s, score)
             }
         }
-        return nil
+        return best
     }
 }
 

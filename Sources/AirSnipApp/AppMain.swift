@@ -61,6 +61,8 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             switch action {
             case .screenshot:
                 self.triggerCapture()
+            case .longshotCapture:
+                self.triggerDirectLongshotCapture()
             case .ocrCapture:
                 self.triggerDirectOCRCapture()
             case .pin:
@@ -157,6 +159,12 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         capItem.target = self
         menu.addItem(capItem)
 
+        let lsCapHint = config.hotkeys.longshotCapture.isUnbound ? "" : " (\(config.hotkeys.longshotCapture.displayString))"
+        let lsCapItem = NSMenuItem(title: "页面长截图\(lsCapHint)", action: #selector(menuDirectLongshotCapture), keyEquivalent: "")
+        lsCapItem.image = menuIcon("arrow.up.and.down.text.horizontal")
+        lsCapItem.target = self
+        menu.addItem(lsCapItem)
+
         let ocrCapHint = config.hotkeys.ocrCapture.isUnbound ? "" : " (\(config.hotkeys.ocrCapture.displayString))"
         let ocrCapItem = NSMenuItem(title: "截图识字\(ocrCapHint)", action: #selector(menuDirectOCRCapture), keyEquivalent: "")
         ocrCapItem.image = menuIcon("text.viewfinder")
@@ -210,6 +218,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     @objc private func menuCapture() {
         startScreenCaptureOverlay(mode: .normalCapture, fromMenu: true)
+    }
+    @objc private func menuDirectLongshotCapture() {
+        startScreenCaptureOverlay(mode: .directLongshotCapture, fromMenu: true)
     }
     @objc private func menuDirectOCRCapture() {
         startScreenCaptureOverlay(mode: .directOCRCapture, fromMenu: true)
@@ -276,6 +287,10 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
 
     public func triggerCapture() {
         startScreenCaptureOverlay(mode: .normalCapture)
+    }
+
+    public func triggerDirectLongshotCapture() {
+        startScreenCaptureOverlay(mode: .directLongshotCapture)
     }
 
     public func triggerDirectOCRCapture() {
@@ -435,9 +450,14 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 config: self.config
             )
         }
-        coordinator.onStartLongshot = { [weak self] screen, vpRect, initBuf in
+        coordinator.onStartLongshot = { [weak self] screen, vpRect, initBuf, forceAutoScroll in
             guard let self else { return }
-            self.beginLongshotSession(screen: screen, viewportTopDown: vpRect, initialCrop: initBuf)
+            self.beginLongshotSession(
+                screen: screen,
+                viewportTopDown: vpRect,
+                initialCrop: initBuf,
+                forceAutoScroll: forceAutoScroll
+            )
         }
         coordinator.onSessionEnded = { [weak self] in
             self?.activeCaptureSession = nil
@@ -445,13 +465,22 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         return coordinator
     }
 
-    private func beginLongshotSession(screen: NSScreen, viewportTopDown: ASRect, initialCrop: PixelBufferRGBA) {
+    private func beginLongshotSession(
+        screen: NSScreen,
+        viewportTopDown: ASRect,
+        initialCrop: PixelBufferRGBA,
+        forceAutoScroll: Bool
+    ) {
         let ls = LongshotSessionController(
             screen: screen,
             viewportTopDown: viewportTopDown,
             initialCrop: initialCrop,
-            config: config
+            config: config,
+            autoStartScroll: forceAutoScroll || config.longshotAutoScroll
         )
+        ls.onSpeedChanged = { [weak self] newSpeed in
+            self?.updateConfig { $0.longshotScrollSpeed = newSpeed }
+        }
         ls.onFinishCopy = { [weak self] cgImg, scale in
             let currentCfg = self?.config
             let showToast = currentCfg?.showCompletionToast ?? true

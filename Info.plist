@@ -19,9 +19,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.3.5</string>
+    <string>0.3.6</string>
     <key>CFBundleVersion</key>
-    <string>12</string>
+    <string>13</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
@@ -31,7 +31,7 @@
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>iSnip 需要屏幕录制权限以完成截图、标注、贴图与离线文字识别。</string>
+    <string>iSnip 需要屏幕录制权限以完成截图、页面长截图、标注、贴图与离线文字识别。</string>
     <key>AirSnipUpdateRepository</key>
     <string>zzusec/isnip</string>
 </dict>

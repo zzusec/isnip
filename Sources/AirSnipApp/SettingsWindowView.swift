@@ -372,6 +372,8 @@ private struct SettingsControlRow<Control: View>: View {
 
 private struct GeneralSettingsPane: View {
     @ObservedObject var app: AirSnipAppController
+    @State private var hasScreenCapture = ScreenCaptureService.hasScreenCapturePermission()
+    @State private var hasAccessibility = AccessibilityService.hasPermission()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -457,12 +459,11 @@ private struct GeneralSettingsPane: View {
             }
 
             SettingsSectionCard("权限") {
-                let authorized = ScreenCaptureService.hasScreenCapturePermission()
                 SettingsControlRow(
                     title: "屏幕录制",
-                    subtitle: authorized ? nil : "用于截取屏幕画面"
+                    subtitle: hasScreenCapture ? nil : "用于截取屏幕画面"
                 ) {
-                    if authorized {
+                    if hasScreenCapture {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundStyle(.green)
@@ -487,7 +488,48 @@ private struct GeneralSettingsPane: View {
                         }
                     }
                 }
+
+                SettingsRowDivider()
+
+                SettingsControlRow(
+                    title: "辅助功能",
+                    subtitle: hasAccessibility ? nil : "用于页面长截图自动翻页"
+                ) {
+                    if hasAccessibility {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text("已授权")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.green)
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(Color.green.opacity(0.12)))
+                    } else {
+                        HStack(spacing: 8) {
+                            Button("授权") {
+                                _ = AccessibilityService.requestPermissionPrompt()
+                                hasAccessibility = AccessibilityService.hasPermission()
+                            }
+                            .controlSize(.small)
+
+                            Button("打开设置") {
+                                AccessibilityService.openSystemSettings()
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                }
             }
+        }
+        .onAppear {
+            hasScreenCapture = ScreenCaptureService.hasScreenCapturePermission()
+            hasAccessibility = AccessibilityService.hasPermission()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            hasScreenCapture = ScreenCaptureService.hasScreenCapturePermission()
+            hasAccessibility = AccessibilityService.hasPermission()
         }
     }
 }
@@ -634,10 +676,36 @@ private struct CaptureAndPinPane: View {
                         set: { v in app.updateConfig { $0.windowSnap = v } }
                     )
                 )
+            }
+
+            SettingsSectionCard("页面长截图") {
+                SettingsSwitchRow(
+                    title: "自动翻页",
+                    isOn: Binding(
+                        get: { app.config.longshotAutoScroll },
+                        set: { v in app.updateConfig { $0.longshotAutoScroll = v } }
+                    )
+                )
 
                 SettingsRowDivider()
 
-                SettingsControlRow(title: "长截图高度上限") {
+                SettingsControlRow(title: "翻页速度") {
+                    Picker("", selection: Binding(
+                        get: { app.config.longshotScrollSpeed },
+                        set: { s in app.updateConfig { $0.longshotScrollSpeed = s } }
+                    )) {
+                        ForEach(LongshotScrollSpeed.allCases, id: \.self) { s in
+                            Text(s.title).tag(s)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 172)
+                }
+
+                SettingsRowDivider()
+
+                SettingsControlRow(title: "高度上限") {
                     Stepper(
                         "\(app.config.longshotMaxHeight) px",
                         value: Binding(
@@ -816,6 +884,10 @@ private struct HotkeysSettingsPane: View {
             SettingsSectionCard("全局") {
                 HotkeyRow(title: "截图", slotID: "global.screenshot", binding: app.config.hotkeys.screenshot, recordingSlot: $recordingSlot) { b in
                     app.updateConfig { $0.hotkeys.screenshot = b }
+                }
+                SettingsRowDivider()
+                HotkeyRow(title: "页面长截图", slotID: "global.longshotCapture", binding: app.config.hotkeys.longshotCapture, recordingSlot: $recordingSlot) { b in
+                    app.updateConfig { $0.hotkeys.longshotCapture = b }
                 }
                 SettingsRowDivider()
                 HotkeyRow(title: "截图识字", slotID: "global.ocrCapture", binding: app.config.hotkeys.ocrCapture, recordingSlot: $recordingSlot) { b in
@@ -1275,7 +1347,7 @@ private struct AboutSettingsPane: View {
                             .padding(.vertical, 2)
                             .background(Capsule().fill(Color.accentColor.opacity(0.12)))
                     }
-                    Text("截图标注 · 无损压缩 · 贴图 · 离线 OCR")
+                    Text("截图标注 · 页面长截图 · 无损压缩 · 贴图 · 离线 OCR")
                         .font(.system(size: 12.5))
                         .foregroundStyle(.secondary)
                 }
