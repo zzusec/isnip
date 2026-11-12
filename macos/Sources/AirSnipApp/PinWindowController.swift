@@ -1,0 +1,413 @@
+import AppKit
+import Carbon
+import AirSnipCore
+
+@MainActor
+public final class PinManager: ObservableObject {
+    @Published public private(set) var windows: [PinWindowController] = []
+    public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
+    public var getConfig: (() -> AirSnipConfig)?
+    public var updateConfig: (((inout AirSnipConfig) -> Void) -> Void)?
+
+    public init() {}
+
+    public var count: Int { windows.count }
+    public var hasClickThroughPins: Bool { windows.contains { $0.isClickThrough } }
+
+    public func createPin(
+        cgImage: CGImage,
+        backingScale: Double,
+        preferredScreenOriginAppKit: CGPoint?,
+        config: AirSnipConfig
+    ) {
+        if windows.count >= config.pinMaxCount {
+            ToastHUD.show("已达贴图上限（最多 \(config.pinMaxCount) 张）")
+            return
+        }
+        let pointW = max(32.0, Double(cgImage.width) / max(1.0, backingScale))
+        let pointH = max(32.0, Double(cgImage.height) / max(1.0, backingScale))
+        let size = NSSize(width: pointW, height: pointH)
+
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let vis = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+
+        let origin: NSPoint
+        if config.pinPosition == .original, let pref = preferredScreenOriginAppKit {
+            origin = pref
+        } else {
+            let cascade = CGFloat(windows.count % 6) * 18.0
+            origin = NSPoint(
+                x: vis.midX - size.width * 0.5 + cascade,
+                y: vis.midY - size.height * 0.5 - cascade
+            )
+        }
+
+        let controller = PinWindowController(
+            cgImage: cgImage,
+            baseSize: size,
+            backingScale: backingScale,
+            origin: origin,
+            showBorder: config.pinBorder,
+            manager: self
+        )
+        windows.append(controller)
+        controller.show()
+    }
+
+    public func remove(_ pin: PinWindowController) {
+        pin.window.orderOut(nil)
+        windows.removeAll { $0 === pin }
+    }
+
+    public func closeAll() {
+        for w in windows {
+            w.window.orderOut(nil)
+        }
+        windows.removeAll()
+    }
+
+    public func restoreAllClickThrough() {
+        for w in windows where w.isClickThrough {
+            w.setClickThrough(false)
+        }
+        ToastHUD.show("已恢复全部贴图的鼠标交互")
+    }
+
+    public func toggleAllBorders() {
+        let target = !(windows.first?.showBorder ?? true)
+        for w in windows {
+            w.setShowBorder(target)
+        }
+        updateConfig? { $0.pinBorder = target }
+        ToastHUD.show(target ? "已开启贴图边框" : "已隐藏贴图边框")
+    }
+}
+
+private final class PinPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+@MainActor
+public final class PinWindowController: NSObject {
+    public let window: NSPanel
+    public private(set) var cgImage: CGImage
+    public private(set) var baseSize: NSSize
+    public let backingScale: Double
+    public private(set) var zoomScale: CGFloat = 1.0
+    public private(set) var opacity: CGFloat = 1.0
+    public private(set) var showBorder: Bool
+    public private(set) var isClickThrough: Bool = false
+
+    private weak var manager: PinManager?
+    private let contentView: PinCanvasView
+
+    public init(
+        cgImage: CGImage,
+        baseSize: NSSize,
+        backingScale: Double,
+        origin: NSPoint,
+        showBorder: Bool,
+        manager: PinManager
+    ) {
+        self.cgImage = cgImage
+        self.baseSize = baseSize
+        self.backingScale = backingScale
+        self.showBorder = showBorder
+        self.manager = manager
+
+        let rect = NSRect(origin: origin, size: baseSize)
+        let panel = PinPanel(
+            contentRect: rect,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 2)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isMovableByWindowBackground = false
+
+        self.contentView = PinCanvasView(frame: NSRect(origin: .zero, size: baseSize))
+        self.window = panel
+        super.init()
+
+        contentView.owner = self
+        panel.contentView = contentView
+        contentView.needsDisplay = true
+    }
+
+    public func show() {
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(contentView)
+    }
+
+    public func updateImage(_ newImage: CGImage) {
+        self.cgImage = newImage
+        self.baseSize = NSSize(
+            width: max(32.0, Double(newImage.width) / max(1.0, backingScale)),
+            height: max(32.0, Double(newImage.height) / max(1.0, backingScale))
+        )
+        self.zoomScale = 1.0
+        var frame = window.frame
+        let center = NSPoint(x: frame.midX, y: frame.midY)
+        frame.size = baseSize
+        frame.origin = NSPoint(x: center.x - baseSize.width * 0.5, y: center.y - baseSize.height * 0.5)
+        window.setFrame(frame, display: true)
+        contentView.frame = NSRect(origin: .zero, size: baseSize)
+        contentView.needsDisplay = true
+    }
+
+    public func setShowBorder(_ on: Bool) {
+        showBorder = on
+        contentView.needsDisplay = true
+    }
+
+    public func setClickThrough(_ on: Bool) {
+        isClickThrough = on
+        window.ignoresMouseEvents = on
+        window.alphaValue = on ? min(opacity, 0.82) : opacity
+        if on {
+            ToastHUD.show("贴图已开启鼠标穿透（可在菜单栏恢复）")
+        }
+    }
+
+    public func adjustZoom(delta: CGFloat, anchorInWindow: NSPoint) {
+        let factor: CGFloat = delta > 0 ? 1.08 : 0.925
+        let newScale = max(0.2, min(4.0, zoomScale * factor))
+        guard abs(newScale - zoomScale) > 0.001 else { return }
+
+        let oldFrame = window.frame
+        let relX = anchorInWindow.x / max(1, oldFrame.width)
+        let relY = anchorInWindow.y / max(1, oldFrame.height)
+
+        zoomScale = newScale
+        let newW = round(baseSize.width * zoomScale)
+        let newH = round(baseSize.height * zoomScale)
+        let screenAnchorX = oldFrame.minX + anchorInWindow.x
+        let screenAnchorY = oldFrame.minY + anchorInWindow.y
+        let newOrigin = NSPoint(x: screenAnchorX - newW * relX, y: screenAnchorY - newH * relY)
+
+        window.setFrame(NSRect(origin: newOrigin, size: NSSize(width: newW, height: newH)), display: true)
+        contentView.frame = NSRect(x: 0, y: 0, width: newW, height: newH)
+        contentView.showBadgeTemporarily("\(Int((zoomScale * 100).rounded()))%")
+        contentView.needsDisplay = true
+    }
+
+    public func adjustOpacity(delta: CGFloat) {
+        let step: CGFloat = delta > 0 ? 0.06 : -0.06
+        opacity = max(0.15, min(1.0, opacity + step))
+        window.alphaValue = opacity
+        contentView.showBadgeTemporarily("透明度 \(Int((opacity * 100).rounded()))%")
+    }
+
+    public func resetTransform() {
+        zoomScale = 1.0
+        opacity = 1.0
+        window.alphaValue = 1.0
+        var f = window.frame
+        f.size = baseSize
+        window.setFrame(f, display: true)
+        contentView.frame = NSRect(origin: .zero, size: baseSize)
+        contentView.needsDisplay = true
+    }
+
+    public func requestInlineAnnotate() {
+        manager?.onRequestAnnotatePin?(self)
+    }
+
+    public func copyToClipboard() {
+        OutputService.copyImageToClipboard(cgImage, backingScale: backingScale)
+        ToastHUD.show("已复制贴图")
+    }
+
+    public func saveAs() {
+        guard var cfg = manager?.getConfig?() else { return }
+        if OutputService.presentSaveDialog(for: cgImage, config: &cfg, parentWindow: window) != nil {
+            let finalCfg = cfg
+            manager?.updateConfig? { $0 = finalCfg }
+            ToastHUD.show("贴图已保存")
+        }
+    }
+
+    public func closeSelf() {
+        manager?.remove(self)
+    }
+
+    public func closeAllPins() {
+        manager?.closeAll()
+    }
+}
+
+@MainActor
+private final class PinCanvasView: NSView {
+    weak var owner: PinWindowController?
+    private var dragStartMouseScreen: NSPoint?
+    private var dragStartWindowOrigin: NSPoint?
+    private var badgeText: String?
+    private var badgeClearTask: Task<Void, Never>?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    func showBadgeTemporarily(_ text: String) {
+        badgeText = text
+        needsDisplay = true
+        badgeClearTask?.cancel()
+        badgeClearTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 850_000_000)
+            guard !Task.isCancelled else { return }
+            self?.badgeText = nil
+            self?.needsDisplay = true
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let owner, let ctx = NSGraphicsContext.current?.cgContext else { return }
+        ctx.interpolationQuality = .high
+        ctx.draw(owner.cgImage, in: bounds)
+
+        if owner.showBorder {
+            ctx.setStrokeColor(CGColor(srgbRed: 0.12, green: 0.53, blue: 0.90, alpha: 0.95))
+            ctx.setLineWidth(1.5)
+            ctx.stroke(bounds.insetBy(dx: 0.75, dy: 0.75))
+        }
+
+        if let badge = badgeText {
+            let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
+            let sz = (badge as NSString).size(withAttributes: attrs)
+            let pill = NSRect(x: 8, y: bounds.height - sz.height - 14, width: sz.width + 14, height: sz.height + 6)
+            let path = NSBezierPath(roundedRect: pill, xRadius: 5, yRadius: 5)
+            NSColor(calibratedWhite: 0.08, alpha: 0.78).setFill()
+            path.fill()
+            (badge as NSString).draw(at: NSPoint(x: pill.minX + 7, y: pill.minY + 3), withAttributes: attrs)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeKey()
+        window?.makeFirstResponder(self)
+        if event.clickCount == 2 {
+            owner?.closeSelf()
+            return
+        }
+        dragStartMouseScreen = NSEvent.mouseLocation
+        dragStartWindowOrigin = window?.frame.origin
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let startMouse = dragStartMouseScreen,
+              let startOrigin = dragStartWindowOrigin,
+              let win = window else { return }
+        let cur = NSEvent.mouseLocation
+        win.setFrameOrigin(NSPoint(
+            x: startOrigin.x + (cur.x - startMouse.x),
+            y: startOrigin.y + (cur.y - startMouse.y)
+        ))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragStartMouseScreen = nil
+        dragStartWindowOrigin = nil
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let owner else { return }
+        let delta = abs(event.scrollingDeltaY) > 0.01 ? event.scrollingDeltaY : event.deltaY
+        guard abs(delta) > 0.01 else { return }
+        let flags = event.modifierFlags
+        if flags.contains(.control) || flags.contains(.command) {
+            owner.adjustOpacity(delta: delta)
+        } else {
+            let loc = convert(event.locationInWindow, from: nil)
+            owner.adjustZoom(delta: delta, anchorInWindow: loc)
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard let owner, let win = window else { return }
+        let step: CGFloat = event.modifierFlags.contains(.shift) ? 5.0 : 1.0
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        if (flags.contains(.command) || flags.contains(.control)), event.keyCode == UInt16(kVK_ANSI_C) {
+            owner.copyToClipboard()
+            return
+        }
+        if (flags.contains(.command) || flags.contains(.control)), event.keyCode == UInt16(kVK_ANSI_S) {
+            owner.saveAs()
+            return
+        }
+
+        switch Int(event.keyCode) {
+        case kVK_Escape:
+            owner.closeSelf()
+        case kVK_Space:
+            owner.requestInlineAnnotate()
+        case kVK_LeftArrow:
+            win.setFrameOrigin(NSPoint(x: win.frame.origin.x - step, y: win.frame.origin.y))
+        case kVK_RightArrow:
+            win.setFrameOrigin(NSPoint(x: win.frame.origin.x + step, y: win.frame.origin.y))
+        case kVK_UpArrow:
+            win.setFrameOrigin(NSPoint(x: win.frame.origin.x, y: win.frame.origin.y + step))
+        case kVK_DownArrow:
+            win.setFrameOrigin(NSPoint(x: win.frame.origin.x, y: win.frame.origin.y - step))
+        default:
+            super.keyDown(with: event)
+        }
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let owner else { return nil }
+        let menu = NSMenu(title: "贴图")
+        let editItem = NSMenuItem(title: "编辑标注 (Space)", action: #selector(onEdit), keyEquivalent: "")
+        editItem.target = self
+        menu.addItem(editItem)
+
+        let copyItem = NSMenuItem(title: "复制图片", action: #selector(onCopy), keyEquivalent: "c")
+        copyItem.target = self
+        menu.addItem(copyItem)
+
+        let saveItem = NSMenuItem(title: "另存为…", action: #selector(onSave), keyEquivalent: "s")
+        saveItem.target = self
+        menu.addItem(saveItem)
+
+        menu.addItem(.separator())
+
+        let borderItem = NSMenuItem(title: owner.showBorder ? "隐藏边框" : "显示边框", action: #selector(onToggleBorder), keyEquivalent: "")
+        borderItem.target = self
+        menu.addItem(borderItem)
+
+        let throughItem = NSMenuItem(title: "鼠标点击穿透", action: #selector(onClickThrough), keyEquivalent: "")
+        throughItem.target = self
+        menu.addItem(throughItem)
+
+        let resetItem = NSMenuItem(title: "重置为 100% 大小与不透明", action: #selector(onReset), keyEquivalent: "")
+        resetItem.target = self
+        menu.addItem(resetItem)
+
+        menu.addItem(.separator())
+
+        let closeItem = NSMenuItem(title: "关闭贴图 (Esc)", action: #selector(onClose), keyEquivalent: "")
+        closeItem.target = self
+        menu.addItem(closeItem)
+
+        let closeAllItem = NSMenuItem(title: "关闭全部贴图", action: #selector(onCloseAll), keyEquivalent: "")
+        closeAllItem.target = self
+        menu.addItem(closeAllItem)
+        return menu
+    }
+
+    @objc private func onEdit() { owner?.requestInlineAnnotate() }
+    @objc private func onCopy() { owner?.copyToClipboard() }
+    @objc private func onSave() { owner?.saveAs() }
+    @objc private func onToggleBorder() {
+        guard let owner else { return }
+        owner.setShowBorder(!owner.showBorder)
+    }
+    @objc private func onClickThrough() { owner?.setClickThrough(true) }
+    @objc private func onReset() { owner?.resetTransform() }
+    @objc private func onClose() { owner?.closeSelf() }
+    @objc private func onCloseAll() { owner?.closeAllPins() }
+}
