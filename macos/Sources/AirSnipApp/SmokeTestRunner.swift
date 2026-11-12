@@ -7,7 +7,7 @@ import AirSnipCore
 public enum SmokeTestRunner {
     public static func run() -> Bool {
         do {
-            print("[smoke] 1/5 验证配置往返与 24 项工具栏可见性...")
+            print("[smoke] 1/6 验证配置往返与 24 项工具栏可见性...")
             let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("airsnip-smoke-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -25,7 +25,7 @@ public enum SmokeTestRunner {
                 return false
             }
 
-            print("[smoke] 2/5 验证 10 大矢量标注烘焙与三次盒式高斯模糊...")
+            print("[smoke] 2/6 验证 10 大矢量标注烘焙与三次盒式高斯模糊...")
             let baseW = 400
             let baseH = 260
             var rawBytes = [UInt8](repeating: 255, count: baseW * baseH * 4)
@@ -67,7 +67,7 @@ public enum SmokeTestRunner {
                 return false
             }
 
-            print("[smoke] 3/5 验证 PNG / JPEG / 纯 Swift 无损 WebP 编码与 ImageIO 逐像素无损校验...")
+            print("[smoke] 3/6 验证 PNG / JPEG / 纯 Swift 无损 WebP 编码与 ImageIO 逐像素无损校验...")
             let pngData = try ImageEncoder.encode(baked, format: .png)
             let jpgData = try ImageEncoder.encode(baked, format: .jpeg)
             let webpData = try ImageEncoder.encode(baked, format: .webp)
@@ -84,7 +84,7 @@ public enum SmokeTestRunner {
                 return false
             }
 
-            print("[smoke] 4/5 验证长截图固定页眉页脚检测与滚动拼接引擎...")
+            print("[smoke] 4/6 验证长截图固定页眉页脚检测与滚动拼接引擎...")
             let w = 80
             let pageRows = 160
             var page = [UInt8](repeating: 255, count: w * pageRows * 4)
@@ -132,7 +132,7 @@ public enum SmokeTestRunner {
                 return false
             }
 
-            print("[smoke] 5/5 验证本地离线 Vision OCR 中英文识别与二维码解析...")
+            print("[smoke] 5/6 验证本地离线 Vision OCR 中英文识别与二维码解析...")
             let ocrW = 680
             let ocrH = 180
             guard let ocrCtx = CGContext(
@@ -185,6 +185,37 @@ public enum SmokeTestRunner {
                     fputs("FAIL: LocalVisionOCR barcode missing expected payload: \(detailed.barcodes)\n", stderr)
                     return false
                 }
+            }
+
+            print("[smoke] 6/6 验证菜单栏常驻 (.accessory) 模式下截图覆盖层 NSPanel 防自动隐藏与会话清理...")
+            let overlayOK: Bool = MainActor.assumeIsolated {
+                let app = NSApplication.shared
+                app.setActivationPolicy(.accessory)
+                guard let screen = NSScreen.main ?? NSScreen.screens.first,
+                      let rawBuf = PixelBufferRGBA(cgImage: baseCG) else {
+                    return false
+                }
+                let sFrame = screen.frame
+                let snap = CapturedScreenSnapshot(
+                    screen: screen,
+                    frameInGlobalAppKit: sFrame,
+                    frameTopDown: ASRect(x: 0, y: 0, width: Double(sFrame.width), height: Double(sFrame.height)),
+                    cgImage: baseCG,
+                    rawBuffer: rawBuf,
+                    backingScale: max(1.0, Double(screen.backingScaleFactor)),
+                    windowRectsLocalTopDown: []
+                )
+                var ended = false
+                let coordinator = CaptureSessionCoordinator(config: loaded, mode: .normalCapture)
+                coordinator.onSessionEnded = { ended = true }
+                coordinator.startWithSnapshots([snap])
+                let visibleAndPersistent = coordinator.hasVisibleWindows && coordinator.allPanelsPersistOnDeactivate
+                coordinator.cancelSession()
+                return visibleAndPersistent && !coordinator.hasVisibleWindows && ended
+            }
+            guard overlayOK else {
+                fputs("FAIL: Overlay panel hidesOnDeactivate / accessory visibility check failed\n", stderr)
+                return false
             }
 
             print("smoke-test: ok (AirSnip v\(UpdateChecker.currentVersion))")

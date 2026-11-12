@@ -124,6 +124,8 @@ public final class PinWindowController: NSObject {
             backing: .buffered,
             defer: false
         )
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true

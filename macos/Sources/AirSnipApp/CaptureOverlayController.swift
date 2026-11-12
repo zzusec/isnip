@@ -43,6 +43,19 @@ public final class CaptureSessionCoordinator {
         Set(screenControllers.map { $0.panel.windowNumber })
     }
 
+    public var hasVisibleWindows: Bool {
+        screenControllers.contains { $0.panel.isVisible }
+    }
+
+    public var allPanelsPersistOnDeactivate: Bool {
+        !screenControllers.isEmpty && screenControllers.allSatisfy { !$0.panel.hidesOnDeactivate }
+    }
+
+    public func refocus() {
+        NSApp.activate(ignoringOtherApps: true)
+        screenControllers.first?.focusWindow()
+    }
+
     public func startWithSnapshots(_ snapshots: [CapturedScreenSnapshot]) {
         guard !snapshots.isEmpty else {
             onSessionEnded?()
@@ -311,14 +324,17 @@ final class OverlayScreenController {
         self.coordinator = coordinator
         let p = OverlayPanel(
             contentRect: snapshot.frameInGlobalAppKit,
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+        p.hidesOnDeactivate = false
+        p.isFloatingPanel = true
+        p.becomesKeyOnlyIfNeeded = false
         p.isOpaque = true
         p.hasShadow = false
         p.level = .screenSaver
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         p.acceptsMouseMovedEvents = true
 
         let view = OverlayCanvasView(
@@ -338,6 +354,7 @@ final class OverlayScreenController {
     }
 
     func focusWindow() {
+        panel.orderFrontRegardless()
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(canvasView)
     }

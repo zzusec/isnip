@@ -567,6 +567,7 @@ public enum ToastHUD {
             backing: .buffered,
             defer: false
         )
+        panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true

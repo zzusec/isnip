@@ -3,7 +3,7 @@ import SwiftUI
 import AirSnipCore
 
 @MainActor
-public final class AirSnipAppController: NSObject, ObservableObject {
+public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDelegate {
     @Published public private(set) var config: AirSnipConfig
     @Published public private(set) var hotkeyRegistrationErrors: [String] = []
 
@@ -13,8 +13,10 @@ public final class AirSnipAppController: NSObject, ObservableObject {
     public var settingsController: SettingsWindowController?
 
     private var statusItem: NSStatusItem?
+    private let statusMenu = NSMenu(title: "AirSnip")
     private var activeCaptureSession: CaptureSessionCoordinator?
     private var activeLongshotSession: LongshotSessionController?
+    private var isCapturingSnapshots = false
 
     private static let singleInstanceActivateNotification = Notification.Name("io.zzusec.airsnip.activateSettings")
 
@@ -127,24 +129,19 @@ public final class AirSnipAppController: NSObject, ObservableObject {
         if let button = item.button {
             button.image = makeMenuBarTemplateIcon()
             button.toolTip = "AirSnip（轻截）— 点击打开菜单"
-            button.target = self
-            button.action = #selector(onStatusBarClicked(_:))
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+        statusMenu.delegate = self
+        populateStatusMenu(statusMenu)
+        item.menu = statusMenu
         self.statusItem = item
     }
 
-    @objc private func onStatusBarClicked(_ sender: NSStatusBarButton) {
-        guard let item = statusItem else { return }
-        let menu = buildStatusMenu()
-        item.menu = menu
-        item.button?.performClick(nil)
-        item.menu = nil
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        populateStatusMenu(menu)
     }
 
-    private func buildStatusMenu() -> NSMenu {
-        let menu = NSMenu(title: "AirSnip")
-
+    private func populateStatusMenu(_ menu: NSMenu) {
         let capHint = config.hotkeys.screenshot.isUnbound ? "" : " (\(config.hotkeys.screenshot.displayString))"
         let capItem = NSMenuItem(title: "截图\(capHint)", action: #selector(menuCapture), keyEquivalent: "")
         capItem.target = self
@@ -191,12 +188,14 @@ public final class AirSnipAppController: NSObject, ObservableObject {
         let quitItem = NSMenuItem(title: "退出 AirSnip", action: #selector(menuQuit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
-
-        return menu
     }
 
-    @objc private func menuCapture() { triggerCapture() }
-    @objc private func menuDirectOCRCapture() { triggerDirectOCRCapture() }
+    @objc private func menuCapture() {
+        startScreenCaptureOverlay(mode: .normalCapture, fromMenu: true)
+    }
+    @objc private func menuDirectOCRCapture() {
+        startScreenCaptureOverlay(mode: .directOCRCapture, fromMenu: true)
+    }
     @objc private func menuPinClipboard() { triggerGlobalPinFromClipboard() }
     @objc private func menuOCRClipboard() { triggerOCRFromClipboard() }
     @objc private func menuOCRFile() { triggerOCRFromFile() }
@@ -243,8 +242,25 @@ public final class AirSnipAppController: NSObject, ObservableObject {
         startScreenCaptureOverlay(mode: .directOCRCapture)
     }
 
-    private func startScreenCaptureOverlay(mode: CaptureSessionCoordinator.SessionMode) {
-        guard activeCaptureSession == nil, activeLongshotSession == nil else { return }
+    private func cleanupStaleCaptureSessionIfNeeded() {
+        if let existing = activeCaptureSession, !existing.hasVisibleWindows {
+            existing.cancelSession()
+            activeCaptureSession = nil
+        }
+    }
+
+    private func startScreenCaptureOverlay(mode: CaptureSessionCoordinator.SessionMode, fromMenu: Bool = false) {
+        guard activeLongshotSession == nil, !isCapturingSnapshots else { return }
+
+        if let existing = activeCaptureSession {
+            if !existing.hasVisibleWindows || fromMenu {
+                existing.cancelSession()
+                activeCaptureSession = nil
+            } else {
+                existing.refocus()
+                return
+            }
+        }
 
         if !ScreenCaptureService.hasScreenCapturePermission() {
             let granted = ScreenCaptureService.requestScreenCapturePermissionIfNeeded()
@@ -254,8 +270,13 @@ public final class AirSnipAppController: NSObject, ObservableObject {
             }
         }
 
+        isCapturingSnapshots = true
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.isCapturingSnapshots = false }
+            if fromMenu {
+                try? await Task.sleep(nanoseconds: 150_000_000)
+            }
             do {
                 let snapshots = try await ScreenCaptureService.captureAllDisplays()
                 guard !snapshots.isEmpty else { return }
@@ -292,6 +313,7 @@ public final class AirSnipAppController: NSObject, ObservableObject {
     }
 
     public func triggerGlobalPinFromClipboard() {
+        cleanupStaleCaptureSessionIfNeeded()
         guard activeCaptureSession == nil else { return }
         guard let clip = OutputService.readImageFromClipboard() else {
             // Silent ignore when clipboard contains text or no image (matches AirSnip ADR)
@@ -309,6 +331,7 @@ public final class AirSnipAppController: NSObject, ObservableObject {
     }
 
     private func startPinInlineEditSession(pin: PinWindowController) {
+        cleanupStaleCaptureSessionIfNeeded()
         guard activeCaptureSession == nil, activeLongshotSession == nil else { return }
         let coordinator = makeSessionCoordinator(mode: .inlinePinEdit(pin))
         activeCaptureSession = coordinator
@@ -316,6 +339,7 @@ public final class AirSnipAppController: NSObject, ObservableObject {
     }
 
     private func startStandaloneAnnotateSession(image: CGImage, scale: Double, screen: NSScreen) {
+        cleanupStaleCaptureSessionIfNeeded()
         guard activeCaptureSession == nil else { return }
         let coordinator = makeSessionCoordinator(mode: .standaloneImageEdit(image, scale, screen))
         activeCaptureSession = coordinator

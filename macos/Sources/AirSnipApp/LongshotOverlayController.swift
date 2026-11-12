@@ -97,6 +97,7 @@ public final class LongshotSessionController: ObservableObject {
             backing: .buffered,
             defer: false
         )
+        bWin.hidesOnDeactivate = false
         bWin.isOpaque = false
         bWin.backgroundColor = .clear
         bWin.level = .statusBar
@@ -134,6 +135,7 @@ public final class LongshotSessionController: ObservableObject {
                 backing: .buffered,
                 defer: false
             )
+            pWin.hidesOnDeactivate = false
             pWin.isOpaque = false
             pWin.backgroundColor = .clear
             pWin.hasShadow = true
@@ -159,6 +161,7 @@ public final class LongshotSessionController: ObservableObject {
             backing: .buffered,
             defer: false
         )
+        cWin.hidesOnDeactivate = false
         cWin.isOpaque = false
         cWin.backgroundColor = .clear
         cWin.hasShadow = true

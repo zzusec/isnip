@@ -16,6 +16,7 @@ public final class SettingsWindowController {
         NSApp.activate(ignoringOtherApps: true)
         if let win = window {
             applyTheme(appController.config.theme, to: win)
+            win.orderFrontRegardless()
             win.makeKeyAndOrderFront(nil)
             return
         }
@@ -32,6 +33,7 @@ public final class SettingsWindowController {
         applyTheme(appController.config.theme, to: win)
         win.contentView = NSHostingView(rootView: SettingsRootView(app: appController))
         self.window = win
+        win.orderFrontRegardless()
         win.makeKeyAndOrderFront(nil)
     }
 

@@ -191,6 +191,7 @@ public final class OCRBubbleManager: ObservableObject {
             applyTheme(theme, to: existing)
             existing.setFrame(NSRect(origin: origin, size: NSSize(width: width, height: height)), display: true)
             NSApp.activate(ignoringOtherApps: true)
+            existing.orderFrontRegardless()
             existing.makeKeyAndOrderFront(nil)
             return
         }
@@ -201,6 +202,8 @@ public final class OCRBubbleManager: ObservableObject {
             backing: .buffered,
             defer: false
         )
+        newPanel.hidesOnDeactivate = false
+        newPanel.isFloatingPanel = isPinnedOnTop
         newPanel.titleVisibility = .hidden
         newPanel.titlebarAppearsTransparent = true
         newPanel.standardWindowButton(.closeButton)?.isHidden = true
@@ -217,6 +220,7 @@ public final class OCRBubbleManager: ObservableObject {
         self.panel = newPanel
 
         NSApp.activate(ignoringOtherApps: true)
+        newPanel.orderFrontRegardless()
         newPanel.makeKeyAndOrderFront(nil)
     }
 

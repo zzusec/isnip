@@ -1,5 +1,12 @@
 # Changelog
 
+## macOS v0.2.1
+
+- 修复菜单栏点击「截图」或按下全局热键后无可见反应的问题：
+  - **禁止 `NSPanel` 失焦自动隐藏**：在菜单栏常驻（`LSUIElement` / `.accessory`）模式下，`NSPanel.hidesOnDeactivate` 默认值为 `true`，导致截图覆盖层弹出后因系统状态栏焦点切回原前台应用而被 AppKit 自动隐藏、且会话锁未释放；现已对截图覆盖层、贴图窗口、长截图控制栏、OCR 识别结果窗及提示 HUD 显式配置 `hidesOnDeactivate = false` 与 `.nonactivatingPanel` / `orderFrontRegardless()`。
+  - **重构菜单栏原生弹出与抓屏时序**：移除 `performClick(nil)` 搭配同步清空 `statusItem.menu = nil` 在 macOS Tahoe 毛玻璃菜单场景下的异步竞态，改用持久化 `NSMenu` + `NSMenuDelegate.menuNeedsUpdate(_:)` 动态刷新，并在菜单项触发抓屏前预留菜单收起缓冲（`150ms`），避免将下拉菜单拍入截图及状态切换冲突。
+  - **会话自愈与重入保护**：新增截图抓屏并发锁与异常不可见会话自动回收机制，确保任何情况下点击菜单栏「截图」或「截图文字识别」均能可靠呼出选区界面。
+
 ## macOS v0.2.0
 
 - 全面强化本地离线 **OCR 文字与二维码识别体系**：
