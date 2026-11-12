@@ -49,7 +49,7 @@ public enum LongshotStitcher {
     }
 
     public static func defaultHorizontalMargin(forWidth width: Int) -> Int {
-        width >= 96 ? min(44, width / 12) : 0
+        width >= 96 ? min(64, width / 12) : 0
     }
 
     public static func rowHashes(

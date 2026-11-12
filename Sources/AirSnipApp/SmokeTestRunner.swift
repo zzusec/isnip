@@ -240,7 +240,7 @@ public enum SmokeTestRunner {
                     cgImage: baseCG,
                     rawBuffer: rawBuf,
                     backingScale: max(1.0, Double(screen.backingScaleFactor)),
-                    windowRectsLocalTopDown: []
+                    windowsLocalTopDown: []
                 )
                 var ended = false
                 var defaultCfg = AirSnipConfig()

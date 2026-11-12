@@ -222,7 +222,7 @@ public final class CaptureSessionCoordinator {
             cgImage: fullCG,
             rawBuffer: fullBuf,
             backingScale: scale,
-            windowRectsLocalTopDown: []
+            windowsLocalTopDown: []
         )
 
         pin.window.orderOut(nil)
@@ -287,7 +287,7 @@ public final class CaptureSessionCoordinator {
             cgImage: fullCG,
             rawBuffer: fullBuf,
             backingScale: scale,
-            windowRectsLocalTopDown: []
+            windowsLocalTopDown: []
         )
 
         let ctrl = OverlayScreenController(snapshot: snap, coordinator: self, lockedInitialSelection: selTopDown)
@@ -614,7 +614,17 @@ final class OverlayCanvasView: NSView {
         let sf = snapshot.frameInGlobalAppKit
         let initX = max(0, min(Double(sf.width), Double(globalMouse.x - sf.minX)))
         let initY = max(0, min(Double(sf.height), Double(sf.maxY - globalMouse.y)))
-        self.cursorPoint = ASPoint(initX, initY)
+        let initPt = ASPoint(initX, initY)
+        self.cursorPoint = initPt
+        if lockedInitialSelection == nil && cfg.windowSnap {
+            self.hoveredWindowRect = WindowSnapResolver.resolve(
+                at: initPt,
+                candidatesFrontToBack: snapshot.windowsLocalTopDown,
+                allowMaximizedSnap: coordinator.isDirectLongshotCapture
+            )
+        } else {
+            self.hoveredWindowRect = nil
+        }
 
         super.init(frame: frame)
 
@@ -2597,11 +2607,7 @@ final class OverlayCanvasView: NSView {
 
         guard let sel = selection else {
             if hoveredResizeHandle != nil { hoveredResizeHandle = nil }
-            if coordinator?.config.windowSnap == true {
-                hoveredWindowRect = snapshot.windowRectsLocalTopDown.first(where: { $0.contains(pt) })
-            } else {
-                hoveredWindowRect = nil
-            }
+            hoveredWindowRect = resolveHoveredWindow(at: pt)
             needsDisplay = true
             return
         }
@@ -2666,6 +2672,15 @@ final class OverlayCanvasView: NSView {
             needsDisplay = true
         }
         updateCursor(at: pt, flags: event.modifierFlags)
+    }
+
+    private func resolveHoveredWindow(at pt: ASPoint) -> ASRect? {
+        guard coordinator?.config.windowSnap == true else { return nil }
+        return WindowSnapResolver.resolve(
+            at: pt,
+            candidatesFrontToBack: snapshot.windowsLocalTopDown,
+            allowMaximizedSnap: coordinator?.isDirectLongshotCapture == true
+        )
     }
 
     private func updateCursor(at pt: ASPoint, flags: NSEvent.ModifierFlags) {
@@ -3108,7 +3123,7 @@ final class OverlayCanvasView: NSView {
 
         case .creatingSelection(_, let moved):
             if !moved {
-                if let snapped = hoveredWindowRect, coordinator?.config.windowSnap == true {
+                if let snapped = hoveredWindowRect ?? resolveHoveredWindow(at: pt), coordinator?.config.windowSnap == true {
                     selection = snapped
                 }
             } else if let sel = selection, (sel.width < 4 || sel.height < 4) {
@@ -3721,7 +3736,7 @@ final class OverlayCanvasView: NSView {
             cgImage: cg,
             rawBuffer: newBuf,
             backingScale: Double(cg.width) / max(1.0, Double(bounds.width)),
-            windowRectsLocalTopDown: []
+            windowsLocalTopDown: []
         )
         selection = nil
         activeTool = nil

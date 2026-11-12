@@ -537,4 +537,55 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertFalse(decoded.longshotAutoScroll)
         XCTAssertEqual(decoded.longshotScrollSpeed, .fast)
     }
+
+    func testWindowSnapZOrderOcclusionPreventsBackgroundSplitThroughMaximizedBrowser() {
+        let screen = ASRect(x: 0, y: 0, width: 1470, height: 956)
+        // Exact real-world layout: maximized Chrome (1470x841) in front of two 735pt half-screen Terminal windows!
+        let floatingWeChat = WindowSnapCandidate.make(
+            localRect: ASRect(x: 594, y: 266, width: 280, height: 380),
+            screenSize: screen
+        )!
+        let maximizedChrome = WindowSnapCandidate.make(
+            localRect: ASRect(x: 0, y: 33, width: 1470, height: 841),
+            screenSize: screen
+        )!
+        let hiddenLeftHalfTerminal = WindowSnapCandidate.make(
+            localRect: ASRect(x: 0, y: 33, width: 735, height: 843),
+            screenSize: screen
+        )!
+        let hiddenRightHalfTerminal = WindowSnapCandidate.make(
+            localRect: ASRect(x: 735, y: 33, width: 735, height: 843),
+            screenSize: screen
+        )!
+
+        XCTAssertFalse(floatingWeChat.isMaximizedLike)
+        XCTAssertTrue(maximizedChrome.isMaximizedLike)
+        XCTAssertFalse(hiddenLeftHalfTerminal.isMaximizedLike)
+        XCTAssertFalse(hiddenRightHalfTerminal.isMaximizedLike)
+
+        // Case 1: Chrome frontmost over two half-screen Terminals
+        let chromeInFront = [maximizedChrome, hiddenLeftHalfTerminal, hiddenRightHalfTerminal]
+        // In normal screenshot mode (`allowMaximizedSnap: false`), hovering Chrome returns `nil`
+        // and NEVER pierces through Chrome to ghost-highlight the hidden 735pt half-screen Terminals!
+        XCTAssertNil(WindowSnapResolver.resolve(at: ASPoint(350, 400), candidatesFrontToBack: chromeInFront, allowMaximizedSnap: false))
+        XCTAssertNil(WindowSnapResolver.resolve(at: ASPoint(1100, 400), candidatesFrontToBack: chromeInFront, allowMaximizedSnap: false))
+
+        // In Page Longshot mode (`allowMaximizedSnap: true`), hovering Chrome snaps cleanly to the FULL 1470x841 Chrome window!
+        XCTAssertEqual(
+            WindowSnapResolver.resolve(at: ASPoint(350, 400), candidatesFrontToBack: chromeInFront, allowMaximizedSnap: true),
+            ASRect(x: 0, y: 33, width: 1470, height: 841)
+        )
+        XCTAssertEqual(
+            WindowSnapResolver.resolve(at: ASPoint(1100, 400), candidatesFrontToBack: chromeInFront, allowMaximizedSnap: true),
+            ASRect(x: 0, y: 33, width: 1470, height: 841)
+        )
+
+        // Case 2: Small floating window (WeChat) in front of maximized Chrome -> snaps to WeChat when hovered
+        let weChatOverChrome = [floatingWeChat, maximizedChrome, hiddenLeftHalfTerminal, hiddenRightHalfTerminal]
+        XCTAssertEqual(
+            WindowSnapResolver.resolve(at: ASPoint(650, 350), candidatesFrontToBack: weChatOverChrome, allowMaximizedSnap: false),
+            ASRect(x: 594, y: 266, width: 280, height: 380)
+        )
+        XCTAssertNil(WindowSnapResolver.resolve(at: ASPoint(200, 350), candidatesFrontToBack: weChatOverChrome, allowMaximizedSnap: false))
+    }
 }

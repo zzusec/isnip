@@ -17,8 +17,8 @@ public struct CapturedScreenSnapshot {
     public let cgImage: CGImage
     public let rawBuffer: PixelBufferRGBA
     public let backingScale: Double
-    /// Visible window rects localized to this screen's top-down point coordinates (0,0 = screen top-left)
-    public let windowRectsLocalTopDown: [ASRect]
+    /// Visible windows in strict front-to-back Z-order localized to this screen's top-down point coordinates (0,0 = screen top-left)
+    public let windowsLocalTopDown: [WindowSnapCandidate]
 }
 
 @MainActor
@@ -108,8 +108,8 @@ public enum ScreenCaptureService {
             return []
         }
         let ignoredOwners: Set<String> = [
-            "Dock", "Window Server", "WindowManager", "Wallpaper",
-            "SystemUIServer", "Control Center", "Notification Center", "Spotlight"
+            "Dock", "程序坞", "Window Server", "WindowManager", "Wallpaper", "墙纸",
+            "SystemUIServer", "Control Center", "控制中心", "Notification Center", "通知中心", "Spotlight", "聚焦"
         ]
         var rects: [ASRect] = []
         for entry in infoList {
@@ -172,26 +172,21 @@ public enum ScreenCaptureService {
                 height: Double(screen.frame.height)
             )
 
-            let fullArea = max(1.0, screenTopDown.width * screenTopDown.height)
-            let localWinRects: [ASRect] = globalWinRects.compactMap { wr in
+            let localScreenSize = ASRect(x: 0, y: 0, width: screenTopDown.width, height: screenTopDown.height)
+            let localWindows: [WindowSnapCandidate] = globalWinRects.compactMap { wr in
                 let ix0 = max(screenTopDown.minX, wr.minX)
                 let iy0 = max(screenTopDown.minY, wr.minY)
                 let ix1 = min(screenTopDown.maxX, wr.maxX)
                 let iy1 = min(screenTopDown.maxY, wr.maxY)
                 let w = ix1 - ix0
                 let h = iy1 - iy0
-                guard w >= 16 && h >= 16 else { return nil }
-                // Exclude maximized / fullscreen windows so pressing the capture hotkey
-                // does not feel like the entire screen is automatically selected.
-                if w >= screenTopDown.width * 0.92 && h >= screenTopDown.height * 0.82 && (w * h) / fullArea >= 0.78 {
-                    return nil
-                }
-                return ASRect(
+                let localRect = ASRect(
                     x: ix0 - screenTopDown.minX,
                     y: iy0 - screenTopDown.minY,
                     width: w,
                     height: h
                 )
+                return WindowSnapCandidate.make(localRect: localRect, screenSize: localScreenSize)
             }
 
             results.append(CapturedScreenSnapshot(
@@ -201,7 +196,7 @@ public enum ScreenCaptureService {
                 cgImage: cgImg,
                 rawBuffer: rawBuf,
                 backingScale: scale,
-                windowRectsLocalTopDown: localWinRects
+                windowsLocalTopDown: localWindows
             ))
         }
         return results

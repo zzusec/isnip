@@ -66,6 +66,44 @@ public struct ASRect: Equatable, Hashable, Codable, Sendable {
     }
 }
 
+public struct WindowSnapCandidate: Equatable, Sendable {
+    public let rect: ASRect
+    public let isMaximizedLike: Bool
+
+    public init(rect: ASRect, isMaximizedLike: Bool) {
+        self.rect = rect
+        self.isMaximizedLike = isMaximizedLike
+    }
+
+    public static func make(localRect: ASRect, screenSize: ASRect) -> WindowSnapCandidate? {
+        guard localRect.width >= 16 && localRect.height >= 16 else { return nil }
+        let fullArea = max(1.0, screenSize.width * screenSize.height)
+        let isMax = localRect.width >= screenSize.width * 0.92
+            && localRect.height >= screenSize.height * 0.82
+            && (localRect.width * localRect.height) / fullArea >= 0.78
+        return WindowSnapCandidate(rect: localRect, isMaximizedLike: isMax)
+    }
+}
+
+public enum WindowSnapResolver {
+    /// Resolves the topmost visible window containing `point` in strict front-to-back Z-order.
+    /// Crucially stops at the first hit so maximized foreground windows (e.g. Chrome) occlude
+    /// tiled/split background windows underneath rather than piercing through them.
+    public static func resolve(
+        at point: ASPoint,
+        candidatesFrontToBack: [WindowSnapCandidate],
+        allowMaximizedSnap: Bool
+    ) -> ASRect? {
+        guard let frontmost = candidatesFrontToBack.first(where: { $0.rect.contains(point) }) else {
+            return nil
+        }
+        if frontmost.isMaximizedLike && !allowMaximizedSnap {
+            return nil
+        }
+        return frontmost.rect
+    }
+}
+
 public enum ResizeHandle: Int, CaseIterable, Sendable {
     case topLeft = 0
     case top = 1
