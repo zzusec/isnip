@@ -40,7 +40,7 @@ def main() -> None:
         fail(f"Unexpected CFBundleIdentifier: {bundle_id!r}")
     if bundle_name != "iSnip" or executable != "iSnip":
         fail(f"Expected iSnip bundle/executable name, got {bundle_name!r} / {executable!r}")
-    if update_repo != "zzusec/isnip-releases":
+    if update_repo != "zzusec/isnip":
         fail(f"Unexpected AirSnipUpdateRepository: {update_repo!r}")
 
     if not CHANGELOG_PATH.is_file():
@@ -53,8 +53,8 @@ def main() -> None:
     if not PUBLISH_SCRIPT.is_file():
         fail("Missing publish-release.sh")
     script_text = PUBLISH_SCRIPT.read_text(encoding="utf-8")
-    if "get('private') is not True" not in script_text:
-        fail("publish-release.sh must enforce private source repository check")
+    if "get('private') is not False" not in script_text:
+        fail("publish-release.sh must verify public repository visibility")
     if '[ "$branch" != main ]' not in script_text:
         fail("publish-release.sh must forbid publishing directly from main")
     if "--force" in script_text or "push -f" in script_text:

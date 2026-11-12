@@ -93,8 +93,9 @@ public final class CaptureSessionCoordinator {
     private(set) var config: AirSnipConfig
     public let mode: SessionMode
 
+    public var persistConfigChanges: Bool = true
     public var onCompleteCopy: ((CGImage, Double) -> Void)?
-    public var onCompleteSave: ((CGImage, Double, inout AirSnipConfig) -> Bool)?
+    public var onCompleteSave: ((CGImage, Double, Bool, inout AirSnipConfig) -> Bool)?
     public var onCompletePin: ((CGImage, Double, CGPoint?) -> Void)?
     public var onStartOCR: ((CGImage, NSPoint?) -> Void)?
     public var onStartLongshot: ((NSScreen, ASRect, PixelBufferRGBA) -> Void)?
@@ -297,7 +298,9 @@ public final class CaptureSessionCoordinator {
 
     func mutateConfig(_ block: (inout AirSnipConfig) -> Void) {
         block(&config)
-        try? config.save()
+        if persistConfigChanges {
+            try? config.save()
+        }
         onConfigMutated?(config)
     }
 
@@ -314,13 +317,27 @@ public final class CaptureSessionCoordinator {
         onSessionEnded?()
     }
 
-    func finishWithSave(image: CGImage, scale: Double) {
+    func finishWithSave(image: CGImage, scale: Double, forceDialog: Bool = false) {
+        if !forceDialog && !config.askBeforeSave {
+            closeAllWindows()
+            var cfg = config
+            if onCompleteSave?(image, scale, false, &cfg) ?? false {
+                self.config = cfg
+            }
+            if case .inlinePinEdit(let pin) = mode {
+                pin.updateImage(image)
+                pin.show()
+            }
+            onSessionEnded?()
+            return
+        }
+
         // Hide overlay level temporarily so NSSavePanel appears cleanly above
         for c in screenControllers {
             c.panel.orderOut(nil)
         }
         var cfg = config
-        let saved = onCompleteSave?(image, scale, &cfg) ?? false
+        let saved = onCompleteSave?(image, scale, true, &cfg) ?? false
         if saved {
             self.config = cfg
             if case .inlinePinEdit(let pin) = mode {
@@ -1394,7 +1411,7 @@ final class OverlayCanvasView: NSView {
                 selected: false,
                 enabled: true,
                 tooltip: "保存 · ⌘S",
-                action: { [weak self] in self?.triggerSaveOutput() }
+                action: { [weak self] in self?.triggerSaveOutput(forceDialog: NSEvent.modifierFlags.contains(.option)) }
             ))
         }
 
@@ -3243,7 +3260,7 @@ final class OverlayCanvasView: NSView {
                 triggerCopyOutput()
                 return
             case kVK_ANSI_S where selection != nil:
-                triggerSaveOutput()
+                triggerSaveOutput(forceDialog: shift)
                 return
             case kVK_ANSI_Z:
                 if shift { performRedo() } else { performUndo() }
@@ -3689,9 +3706,9 @@ final class OverlayCanvasView: NSView {
         coordinator?.finishWithCopy(image: out, scale: snapshot.backingScale)
     }
 
-    private func triggerSaveOutput() {
+    private func triggerSaveOutput(forceDialog: Bool = false) {
         guard let out = bakeCurrentSelectionOutput() else { return }
-        coordinator?.finishWithSave(image: out, scale: snapshot.backingScale)
+        coordinator?.finishWithSave(image: out, scale: snapshot.backingScale, forceDialog: forceDialog)
     }
 
     private func triggerPinOutput() {

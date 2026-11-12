@@ -372,9 +372,136 @@ public enum OutputService {
         return nil
     }
 
+    public static func defaultSaveDirectoryURL(for config: AirSnipConfig) -> URL {
+        let fm = FileManager.default
+        if let custom = config.lastSaveDirectory, !custom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let expanded = (custom as NSString).expandingTildeInPath
+            return URL(fileURLWithPath: expanded, isDirectory: true)
+        }
+        if let sysLoc = UserDefaults(suiteName: "com.apple.screencapture")?.string(forKey: "location"),
+           !sysLoc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let expanded = (sysLoc as NSString).expandingTildeInPath
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: expanded, isDirectory: &isDir), isDir.boolValue {
+                return URL(fileURLWithPath: expanded, isDirectory: true)
+            }
+        }
+        if let downloads = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first {
+            return downloads
+        }
+        return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).appendingPathComponent("Downloads", isDirectory: true)
+    }
+
+    public static func displayPath(for url: URL) -> String {
+        (url.path as NSString).abbreviatingWithTildeInPath
+    }
+
+    public static func chooseSaveDirectory(initial: URL) -> URL? {
+        NSApp.activate(ignoringOtherApps: true)
+        let panel = NSOpenPanel()
+        panel.title = "选择保存位置"
+        panel.prompt = "选择"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = initial
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
+    }
+
+    public static func uniqueSaveDestinationURL(directory: URL, baseName: String, ext: String) -> URL {
+        let fm = FileManager.default
+        var candidate = directory.appendingPathComponent("\(baseName).\(ext)")
+        var suffix = 2
+        while fm.fileExists(atPath: candidate.path) {
+            candidate = directory.appendingPathComponent("\(baseName)-\(suffix).\(ext)")
+            suffix += 1
+        }
+        return candidate
+    }
+
+    private static func writeEncodedImage(
+        _ cgImage: CGImage,
+        to url: URL,
+        format: ExportImageFormat,
+        smartCompress: Bool,
+        quality: PngCompressionQualityPreset,
+        onFinalCompressed: (@MainActor @Sendable (URL, PngCompressionResult) -> Void)?
+    ) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if format == .png && smartCompress {
+            // Phase 1 (~200ms): immediate perceptual quantization write so file is ready & compact right away
+            let stage1 = try ImageEncoder.encodePNGWithReport(
+                cgImage,
+                smartCompression: true,
+                quality: quality,
+                mode: .fastQuantizeOnly
+            )
+            try stage1.data.write(to: url, options: .atomic)
+            let savedURL = url
+
+            // Phase 2: atomic background `oxipng -o max` completion (`pngquant --speed 1 | oxipng -o max`)
+            Task.detached(priority: .userInitiated) {
+                let finalRes = PngSmartCompressor.optimizeWithOxipng(
+                    stage1.data,
+                    originalBytes: stage1.originalBytes,
+                    usedPngquant: stage1.usedPngquant,
+                    oxipngMax: true
+                )
+                if finalRes.compressedBytes < stage1.compressedBytes {
+                    try? finalRes.data.write(to: savedURL, options: .atomic)
+                }
+                await MainActor.run {
+                    onFinalCompressed?(savedURL, finalRes)
+                }
+            }
+        } else {
+            let encoded = try ImageEncoder.encode(cgImage, format: format)
+            try encoded.write(to: url, options: .atomic)
+        }
+    }
+
+    public static func saveImage(
+        for cgImage: CGImage,
+        config: inout AirSnipConfig,
+        forceDialog: Bool = false,
+        configSaveURL: URL = AirSnipConfig.defaultConfigFileURL(),
+        parentWindow: NSWindow? = nil,
+        onFinalCompressed: (@MainActor @Sendable (URL, PngCompressionResult) -> Void)? = nil
+    ) -> URL? {
+        if !forceDialog && !config.askBeforeSave {
+            let dir = defaultSaveDirectoryURL(for: config)
+            let baseName = config.nameStyle.formatBaseName()
+            let fmt = config.lastSaveFormat
+            let dest = uniqueSaveDestinationURL(directory: dir, baseName: baseName, ext: fmt.fileExtension)
+            do {
+                try writeEncodedImage(
+                    cgImage,
+                    to: dest,
+                    format: fmt,
+                    smartCompress: config.smartPngCompression,
+                    quality: config.pngCompressionQuality,
+                    onFinalCompressed: onFinalCompressed
+                )
+                return dest
+            } catch {
+                // Directory unavailable or read-only -> fall back to Save As panel so screenshot is never lost
+            }
+        }
+        return presentSaveDialog(
+            for: cgImage,
+            config: &config,
+            configSaveURL: configSaveURL,
+            parentWindow: parentWindow,
+            onFinalCompressed: onFinalCompressed
+        )
+    }
+
     public static func presentSaveDialog(
         for cgImage: CGImage,
         config: inout AirSnipConfig,
+        configSaveURL: URL = AirSnipConfig.defaultConfigFileURL(),
         parentWindow: NSWindow? = nil,
         onFinalCompressed: (@MainActor @Sendable (URL, PngCompressionResult) -> Void)? = nil
     ) -> URL? {
@@ -392,14 +519,12 @@ public enum OutputService {
         let baseName = config.nameStyle.formatBaseName()
         panel.nameFieldStringValue = "\(baseName).\(chosenFormat.fileExtension)"
 
-        if let lastDir = config.lastSaveDirectory {
-            var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: lastDir, isDirectory: &isDir), isDir.boolValue {
-                panel.directoryURL = URL(fileURLWithPath: lastDir, isDirectory: true)
-            }
-        }
-        if panel.directoryURL == nil {
-            panel.directoryURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+        let defaultDir = defaultSaveDirectoryURL(for: config)
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: defaultDir.path, isDirectory: &isDir), isDir.boolValue {
+            panel.directoryURL = defaultDir
+        } else {
+            panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         }
 
         let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 344, height: 70))
@@ -525,42 +650,20 @@ public enum OutputService {
         }
 
         do {
-            if chosenFormat == .png && chosenSmartCompress {
-                // Phase 1 (~200ms): immediate perceptual quantization write so file is ready & compact right away
-                let stage1 = try ImageEncoder.encodePNGWithReport(
-                    cgImage,
-                    smartCompression: true,
-                    quality: chosenQuality,
-                    mode: .fastQuantizeOnly
-                )
-                try stage1.data.write(to: url, options: .atomic)
-                let savedURL = url
-
-                // Phase 2: atomic background `oxipng -o max` completion (`pngquant --speed 1 | oxipng -o max`)
-                Task.detached(priority: .userInitiated) {
-                    let finalRes = PngSmartCompressor.optimizeWithOxipng(
-                        stage1.data,
-                        originalBytes: stage1.originalBytes,
-                        usedPngquant: stage1.usedPngquant,
-                        oxipngMax: true
-                    )
-                    if finalRes.compressedBytes < stage1.compressedBytes {
-                        try? finalRes.data.write(to: savedURL, options: .atomic)
-                    }
-                    await MainActor.run {
-                        onFinalCompressed?(savedURL, finalRes)
-                    }
-                }
-            } else {
-                let encoded = try ImageEncoder.encode(cgImage, format: chosenFormat)
-                try encoded.write(to: url, options: .atomic)
-            }
+            try writeEncodedImage(
+                cgImage,
+                to: url,
+                format: chosenFormat,
+                smartCompress: chosenSmartCompress,
+                quality: chosenQuality,
+                onFinalCompressed: onFinalCompressed
+            )
 
             config.lastSaveFormat = chosenFormat
             config.smartPngCompression = chosenSmartCompress
             config.pngCompressionQuality = chosenQuality
             config.lastSaveDirectory = url.deletingLastPathComponent().path
-            try? config.save()
+            try? config.save(to: configSaveURL)
             return url
         } catch {
             let alert = NSAlert()
@@ -722,7 +825,7 @@ public enum UpdateChecker {
     }
 
     public static var releaseRepo: String {
-        (Bundle.main.infoDictionary?["AirSnipUpdateRepository"] as? String) ?? "zzusec/isnip-releases"
+        (Bundle.main.infoDictionary?["AirSnipUpdateRepository"] as? String) ?? "zzusec/isnip"
     }
 
     public static func checkLatest() async -> Result<UpdateReleaseInfo?, Error> {

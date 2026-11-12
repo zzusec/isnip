@@ -356,4 +356,23 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertEqual(decoded.width, w)
         XCTAssertEqual(decoded.height, h)
     }
+
+    func testDefaultSilentSaveConfigAndBackwardCompatibility() throws {
+        var cfg = AirSnipConfig()
+        XCTAssertFalse(cfg.askBeforeSave)
+        XCTAssertNil(cfg.lastSaveDirectory)
+
+        // Legacy JSON without askBeforeSave decodes to false (silent save by default)
+        let legacyJSON = Data(#"{"lastSaveFormat":"png","smartPngCompression":true}"#.utf8)
+        let fromLegacy = try JSONDecoder().decode(AirSnipConfig.self, from: legacyJSON)
+        XCTAssertFalse(fromLegacy.askBeforeSave)
+
+        // Explicit toggle persists cleanly
+        cfg.askBeforeSave = true
+        cfg.lastSaveDirectory = "/tmp/isnip-custom"
+        let encoded = try JSONEncoder().encode(cfg)
+        let roundtrip = try JSONDecoder().decode(AirSnipConfig.self, from: encoded)
+        XCTAssertTrue(roundtrip.askBeforeSave)
+        XCTAssertEqual(roundtrip.lastSaveDirectory, "/tmp/isnip-custom")
+    }
 }

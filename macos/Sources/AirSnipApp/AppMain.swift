@@ -17,11 +17,13 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     private var activeCaptureSession: CaptureSessionCoordinator?
     private var activeLongshotSession: LongshotSessionController?
     private var isCapturingSnapshots = false
+    private let configURL: URL
 
     private static let singleInstanceActivateNotification = Notification.Name("io.zzusec.airsnip.activateSettings")
 
-    public override init() {
-        self.config = AirSnipConfig.load()
+    public init(configURL: URL = AirSnipConfig.defaultConfigFileURL()) {
+        self.configURL = configURL
+        self.config = AirSnipConfig.load(from: configURL)
         super.init()
 
         self.settingsController = SettingsWindowController(appController: self)
@@ -116,7 +118,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
     public func updateConfig(_ mutate: (inout AirSnipConfig) -> Void) {
         let oldHotkeys = config.hotkeys
         mutate(&config)
-        try? config.save()
+        try? config.save(to: configURL)
         if config.hotkeys != oldHotkeys {
             hotkeyRegistrationErrors = hotkeyManager.apply(hotkeys: config.hotkeys)
         }
@@ -394,12 +396,15 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 }
             }
         }
-        coordinator.onCompleteSave = { [weak self] cgImg, scale, cfg in
+        coordinator.onCompleteSave = { [weak self] cgImg, scale, forceDialog, cfg in
             let _ = scale
             let showToast = cfg.showCompletionToast
-            guard OutputService.presentSaveDialog(
+            let cfgSaveURL = self?.configURL ?? AirSnipConfig.defaultConfigFileURL()
+            guard OutputService.saveImage(
                 for: cgImg,
                 config: &cfg,
+                forceDialog: forceDialog,
+                configSaveURL: cfgSaveURL,
                 onFinalCompressed: { _, finalRes in
                     guard showToast else { return }
                     ToastHUD.show("已保存 · \(finalRes.compactBadgeSummary)")
@@ -466,9 +471,10 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: self.config)
             var cfg = self.config
             let showToast = cfg.showCompletionToast
-            if OutputService.presentSaveDialog(
+            if OutputService.saveImage(
                 for: cgImg,
                 config: &cfg,
+                configSaveURL: self.configURL,
                 onFinalCompressed: { _, finalRes in
                     guard showToast else { return }
                     ToastHUD.show("已保存 · \(finalRes.compactBadgeSummary)")

@@ -17,6 +17,7 @@ public enum SmokeTestRunner {
             var cfg = AirSnipConfig()
             guard cfg.smartPngCompression == true,
                   cfg.compressClipboardPng == true,
+                  cfg.askBeforeSave == false,
                   cfg.pngCompressionQuality == .visuallyLossless,
                   cfg.nameStyle.formatBaseName().hasPrefix("isnip-") else {
                 fputs("FAIL: Default iSnip config or smartPngCompression default mismatch\n", stderr)
@@ -191,7 +192,7 @@ public enum SmokeTestRunner {
             NSGraphicsContext.restoreGraphicsState()
 
             if let qrFilter = CIFilter(name: "CIQRCodeGenerator") {
-                qrFilter.setValue(Data("https://github.com/zzusec/isnip-releases".utf8), forKey: "inputMessage")
+                qrFilter.setValue(Data("https://github.com/zzusec/isnip".utf8), forKey: "inputMessage")
                 qrFilter.setValue("M", forKey: "inputCorrectionLevel")
                 if let ciOut = qrFilter.outputImage {
                     let scaled = ciOut.transformed(by: CGAffineTransform(scaleX: 4, y: 4))
@@ -213,7 +214,7 @@ public enum SmokeTestRunner {
                     fputs("FAIL: LocalVisionOCR output missing expected text: \(detailed.rawText)\n", stderr)
                     return false
                 }
-                guard detailed.barcodes.contains("https://github.com/zzusec/isnip-releases") else {
+                guard detailed.barcodes.contains("https://github.com/zzusec/isnip") else {
                     fputs("FAIL: LocalVisionOCR barcode missing expected payload: \(detailed.barcodes)\n", stderr)
                     return false
                 }
@@ -240,7 +241,19 @@ public enum SmokeTestRunner {
                 var ended = false
                 var defaultCfg = AirSnipConfig()
                 defaultCfg.theme = .light
+                defaultCfg.lastSaveDirectory = tempDir.path
+                var saveCfg = defaultCfg
+                saveCfg.smartPngCompression = false
+                guard let quickSaved1 = OutputService.saveImage(for: baked, config: &saveCfg, configSaveURL: cfgURL),
+                      FileManager.default.fileExists(atPath: quickSaved1.path),
+                      let quickSaved2 = OutputService.saveImage(for: baked, config: &saveCfg, configSaveURL: cfgURL),
+                      FileManager.default.fileExists(atPath: quickSaved2.path),
+                      quickSaved1 != quickSaved2 else {
+                    return false
+                }
+
                 let coordinator = CaptureSessionCoordinator(config: defaultCfg, mode: .normalCapture)
+                coordinator.persistConfigChanges = false
                 coordinator.onSessionEnded = { ended = true }
                 coordinator.startWithSnapshots([snap])
                 let visibleAndPersistent = coordinator.hasVisibleWindows
@@ -277,7 +290,7 @@ public enum SmokeTestRunner {
                 if let dirPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_PREVIEW_DIR"] {
                     let dirURL = URL(fileURLWithPath: dirPath)
                     try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
-                    let dummyApp = AirSnipAppController()
+                    let dummyApp = AirSnipAppController(configURL: tempDir.appendingPathComponent("preview-config.json"))
                     let tabsToDump: [(SettingsTab, String)] = [
                         (.general, "01_general.png"),
                         (.captureAndPin, "02_capture.png"),

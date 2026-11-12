@@ -556,11 +556,42 @@ private struct CaptureAndPinPane: View {
             }
 
             SettingsSectionCard("保存与选区") {
+                let saveDirURL = OutputService.defaultSaveDirectoryURL(for: app.config)
+                SettingsControlRow(title: "保存位置") {
+                    HStack(spacing: 6) {
+                        Text(OutputService.displayPath(for: saveDirURL))
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: 190, alignment: .trailing)
+
+                        Button {
+                            try? FileManager.default.createDirectory(at: saveDirURL, withIntermediateDirectories: true)
+                            NSWorkspace.shared.open(saveDirURL)
+                        } label: {
+                            Image(systemName: "folder")
+                                .font(.system(size: 11.5, weight: .medium))
+                        }
+                        .controlSize(.small)
+                        .help("打开目录")
+
+                        Button("更改…") {
+                            if let chosen = OutputService.chooseSaveDirectory(initial: saveDirURL) {
+                                app.updateConfig { $0.lastSaveDirectory = chosen.path }
+                            }
+                        }
+                        .controlSize(.small)
+                    }
+                }
+
+                SettingsRowDivider()
+
                 SettingsSwitchRow(
-                    title: "自动识别窗口",
+                    title: "每次询问保存位置",
                     isOn: Binding(
-                        get: { app.config.windowSnap },
-                        set: { v in app.updateConfig { $0.windowSnap = v } }
+                        get: { app.config.askBeforeSave },
+                        set: { v in app.updateConfig { $0.askBeforeSave = v } }
                     )
                 )
 
@@ -593,6 +624,16 @@ private struct CaptureAndPinPane: View {
                     .labelsHidden()
                     .frame(width: 124)
                 }
+
+                SettingsRowDivider()
+
+                SettingsSwitchRow(
+                    title: "自动识别窗口",
+                    isOn: Binding(
+                        get: { app.config.windowSnap },
+                        set: { v in app.updateConfig { $0.windowSnap = v } }
+                    )
+                )
 
                 SettingsRowDivider()
 
@@ -1290,10 +1331,14 @@ private struct AboutSettingsPane: View {
                 .padding(.vertical, 9.5)
             }
 
-            Text("GPL-3.0 · 致敬 bd-dxg/airsnip")
-                .font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 4)
+            HStack(spacing: 6) {
+                Text("GPL-3.0 ·")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                Link("https://github.com/zzusec/isnip", destination: URL(string: "https://github.com/zzusec/isnip")!)
+                    .font(.system(size: 11.5))
+            }
+            .padding(.leading, 4)
         }
     }
 }

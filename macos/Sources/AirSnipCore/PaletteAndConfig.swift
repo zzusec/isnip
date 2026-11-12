@@ -713,6 +713,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var nameStyle: NameStyle
     public var lastSaveFormat: ExportImageFormat
     public var lastSaveDirectory: String?
+    public var askBeforeSave: Bool
     public var smartPngCompression: Bool
     public var pngCompressionQuality: PngCompressionQualityPreset
     public var compressClipboardPng: Bool
@@ -744,6 +745,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         nameStyle: NameStyle = .datetime,
         lastSaveFormat: ExportImageFormat = .png,
         lastSaveDirectory: String? = nil,
+        askBeforeSave: Bool = false,
         smartPngCompression: Bool = true,
         pngCompressionQuality: PngCompressionQualityPreset = .visuallyLossless,
         compressClipboardPng: Bool = true,
@@ -774,6 +776,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.nameStyle = nameStyle
         self.lastSaveFormat = lastSaveFormat
         self.lastSaveDirectory = lastSaveDirectory
+        self.askBeforeSave = askBeforeSave
         self.smartPngCompression = smartPngCompression
         self.pngCompressionQuality = pngCompressionQuality
         self.compressClipboardPng = compressClipboardPng
@@ -787,7 +790,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         case autoStart, theme, hotkeys, toolKeys, pinPosition, pinBorder, pinMaxCount, uiScale
         case swatchColors, activeColorIndex, lastTool, defaultLineWidth, defaultBlurRadius
         case defaultFontSize, defaultFontFamily, windowSnap, confirmCancel, showCompletionToast
-        case toolbar, nameStyle, lastSaveFormat, lastSaveDirectory
+        case toolbar, nameStyle, lastSaveFormat, lastSaveDirectory, askBeforeSave
         case smartPngCompression, pngCompressionQuality, compressClipboardPng
         case longshotMaxHeight, autoCheckUpdate, skippedVersion, ocr
     }
@@ -818,6 +821,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.nameStyle = try c.decodeIfPresent(NameStyle.self, forKey: .nameStyle) ?? d.nameStyle
         self.lastSaveFormat = try c.decodeIfPresent(ExportImageFormat.self, forKey: .lastSaveFormat) ?? d.lastSaveFormat
         self.lastSaveDirectory = try c.decodeIfPresent(String.self, forKey: .lastSaveDirectory)
+        self.askBeforeSave = try c.decodeIfPresent(Bool.self, forKey: .askBeforeSave) ?? false
         self.smartPngCompression = try c.decodeIfPresent(Bool.self, forKey: .smartPngCompression) ?? true
         self.pngCompressionQuality = try c.decodeIfPresent(PngCompressionQualityPreset.self, forKey: .pngCompressionQuality) ?? .visuallyLossless
         self.compressClipboardPng = try c.decodeIfPresent(Bool.self, forKey: .compressClipboardPng) ?? true

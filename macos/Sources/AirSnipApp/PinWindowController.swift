@@ -236,12 +236,13 @@ public final class PinWindowController: NSObject {
         }
     }
 
-    public func saveAs() {
+    public func savePin(forceDialog: Bool = false) {
         guard var cfg = manager?.getConfig?() else { return }
         let showToast = cfg.showCompletionToast
-        if OutputService.presentSaveDialog(
+        if OutputService.saveImage(
             for: cgImage,
             config: &cfg,
+            forceDialog: forceDialog,
             parentWindow: window,
             onFinalCompressed: { _, finalRes in
                 guard showToast else { return }
@@ -250,7 +251,7 @@ public final class PinWindowController: NSObject {
         ) != nil {
             let finalCfg = cfg
             manager?.updateConfig? { $0 = finalCfg }
-            if !(finalCfg.lastSaveFormat == .png && finalCfg.smartPngCompression) {
+            if showToast && !(finalCfg.lastSaveFormat == .png && finalCfg.smartPngCompression) {
                 ToastHUD.show("已保存")
             }
         }
@@ -381,7 +382,7 @@ private final class PinCanvasView: NSView {
             return
         }
         if (flags.contains(.command) || flags.contains(.control)), event.keyCode == UInt16(kVK_ANSI_S) {
-            owner.saveAs()
+            owner.savePin(forceDialog: flags.contains(.shift))
             return
         }
 
@@ -420,9 +421,13 @@ private final class PinCanvasView: NSView {
         copyItem.target = self
         menu.addItem(copyItem)
 
-        let saveItem = NSMenuItem(title: "另存为…", action: #selector(onSave), keyEquivalent: "s")
+        let saveItem = NSMenuItem(title: "保存", action: #selector(onSave), keyEquivalent: "s")
         saveItem.target = self
         menu.addItem(saveItem)
+
+        let saveAsItem = NSMenuItem(title: "另存为…", action: #selector(onSaveAs), keyEquivalent: "S")
+        saveAsItem.target = self
+        menu.addItem(saveAsItem)
 
         menu.addItem(.separator())
 
@@ -453,7 +458,8 @@ private final class PinCanvasView: NSView {
     @objc private func onEdit() { owner?.requestInlineAnnotate() }
     @objc private func onOCR() { owner?.requestOCR() }
     @objc private func onCopy() { owner?.copyToClipboard() }
-    @objc private func onSave() { owner?.saveAs() }
+    @objc private func onSave() { owner?.savePin(forceDialog: false) }
+    @objc private func onSaveAs() { owner?.savePin(forceDialog: true) }
     @objc private func onToggleBorder() {
         guard let owner else { return }
         owner.setShowBorder(!owner.showBorder)
