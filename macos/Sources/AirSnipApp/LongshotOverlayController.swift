@@ -6,6 +6,11 @@ import AirSnipCore
 private final class ControlBarPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+}
+
+private final class FullScreenBorderPanel: NSPanel {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
 @MainActor
@@ -91,13 +96,15 @@ public final class LongshotSessionController: ObservableObject {
         )
 
         // 1. Click-through viewport frame window covering `screen`
-        let bWin = NSPanel(
+        let bWin = FullScreenBorderPanel(
             contentRect: sFrame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         bWin.hidesOnDeactivate = false
+        bWin.animationBehavior = .none
+        bWin.setFrame(sFrame, display: false)
         bWin.isOpaque = false
         bWin.backgroundColor = .clear
         bWin.level = .statusBar

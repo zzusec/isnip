@@ -187,7 +187,7 @@ public enum SmokeTestRunner {
                 }
             }
 
-            print("[smoke] 6/6 验证菜单栏常驻 (.accessory) 模式下截图覆盖层 NSPanel 防自动隐藏与会话清理...")
+            print("[smoke] 6/6 验证菜单栏常驻 (.accessory) 模式下零抖动全屏覆盖层 NSPanel 与会话清理...")
             let overlayOK: Bool = MainActor.assumeIsolated {
                 let app = NSApplication.shared
                 app.setActivationPolicy(.accessory)
@@ -206,12 +206,41 @@ public enum SmokeTestRunner {
                     windowRectsLocalTopDown: []
                 )
                 var ended = false
-                let coordinator = CaptureSessionCoordinator(config: loaded, mode: .normalCapture)
+                var defaultCfg = AirSnipConfig()
+                defaultCfg.theme = .light
+                let coordinator = CaptureSessionCoordinator(config: defaultCfg, mode: .normalCapture)
                 coordinator.onSessionEnded = { ended = true }
                 coordinator.startWithSnapshots([snap])
-                let visibleAndPersistent = coordinator.hasVisibleWindows && coordinator.allPanelsPersistOnDeactivate
+                let visibleAndPersistent = coordinator.hasVisibleWindows
+                    && coordinator.allPanelsPersistOnDeactivate
+                    && coordinator.allPanelsZeroAnimationAndExactFrame
+
+                let sampleSel = ASRect(
+                    x: max(20, Double(sFrame.width) * 0.15),
+                    y: max(20, Double(sFrame.height) * 0.20),
+                    width: min(640, Double(sFrame.width) * 0.65),
+                    height: min(320, Double(sFrame.height) * 0.45)
+                )
+                let expectedIDs = [
+                    "tool.rect", "tool.ellipse", "tool.line", "tool.arrow", "tool.freehand",
+                    "tool.blur", "tool.text", "tool.number", "tool.glow",
+                    "output.pin", "edit.undo", "output.ocr", "file.cancel",
+                    "output.longshot", "file.save", "file.copy"
+                ]
+                var toolbarExactMatch = false
+                if let sample = coordinator.renderToolbarVerificationSample(selection: sampleSel) {
+                    toolbarExactMatch = (sample.toolbarIDs == expectedIDs) && !sample.hasSecondaryBar
+                    if let previewPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_PREVIEW_PNG"],
+                       let cg = sample.croppedImage {
+                        let rep = NSBitmapImageRep(cgImage: cg)
+                        if let png = rep.representation(using: .png, properties: [:]) {
+                            try? png.write(to: URL(fileURLWithPath: previewPath))
+                        }
+                    }
+                }
+
                 coordinator.cancelSession()
-                return visibleAndPersistent && !coordinator.hasVisibleWindows && ended
+                return visibleAndPersistent && toolbarExactMatch && !coordinator.hasVisibleWindows && ended
             }
             guard overlayOK else {
                 fputs("FAIL: Overlay panel hidesOnDeactivate / accessory visibility check failed\n", stderr)

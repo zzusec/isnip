@@ -107,9 +107,16 @@ public enum ScreenCaptureService {
         guard let infoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
+        let ignoredOwners: Set<String> = [
+            "Dock", "Window Server", "WindowManager", "Wallpaper",
+            "SystemUIServer", "Control Center", "Notification Center", "Spotlight"
+        ]
         var rects: [ASRect] = []
         for entry in infoList {
             if let ownerPID = entry[kCGWindowOwnerPID as String] as? pid_t, ownerPID == excludingPID {
+                continue
+            }
+            if let ownerName = entry[kCGWindowOwnerName as String] as? String, ignoredOwners.contains(ownerName) {
                 continue
             }
             let layer = (entry[kCGWindowLayer as String] as? Int) ?? 0
@@ -165,17 +172,25 @@ public enum ScreenCaptureService {
                 height: Double(screen.frame.height)
             )
 
+            let fullArea = max(1.0, screenTopDown.width * screenTopDown.height)
             let localWinRects: [ASRect] = globalWinRects.compactMap { wr in
                 let ix0 = max(screenTopDown.minX, wr.minX)
                 let iy0 = max(screenTopDown.minY, wr.minY)
                 let ix1 = min(screenTopDown.maxX, wr.maxX)
                 let iy1 = min(screenTopDown.maxY, wr.maxY)
-                guard ix1 - ix0 >= 16 && iy1 - iy0 >= 16 else { return nil }
+                let w = ix1 - ix0
+                let h = iy1 - iy0
+                guard w >= 16 && h >= 16 else { return nil }
+                // Exclude maximized / fullscreen windows so pressing the capture hotkey
+                // does not feel like the entire screen is automatically selected.
+                if w >= screenTopDown.width * 0.92 && h >= screenTopDown.height * 0.82 && (w * h) / fullArea >= 0.78 {
+                    return nil
+                }
                 return ASRect(
                     x: ix0 - screenTopDown.minX,
                     y: iy0 - screenTopDown.minY,
-                    width: ix1 - ix0,
-                    height: iy1 - iy0
+                    width: w,
+                    height: h
                 )
             }
 
@@ -622,6 +637,7 @@ public enum ToastHUD {
             defer: false
         )
         panel.hidesOnDeactivate = false
+        panel.animationBehavior = .none
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
