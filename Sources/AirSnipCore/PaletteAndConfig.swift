@@ -83,7 +83,7 @@ public enum ColorPalette {
 
     public static let defaultSwatches: [RGBAColor] = [
         RGBAColor(r: 255, g: 255, b: 255),
-        RGBAColor(r: 229, g: 57, b: 53),
+        RGBAColor(r: 255, g: 0, b: 0),
         RGBAColor(r: 251, g: 140, b: 0),
         RGBAColor(r: 67, g: 160, b: 71),
         RGBAColor(r: 30, g: 136, b: 229),
@@ -93,7 +93,7 @@ public enum ColorPalette {
         RGBAColor(r: 255, g: 255, b: 255),
         RGBAColor(r: 0, g: 0, b: 0),
         RGBAColor(r: 158, g: 158, b: 158),
-        RGBAColor(r: 229, g: 57, b: 53),
+        RGBAColor(r: 255, g: 0, b: 0),
         RGBAColor(r: 251, g: 140, b: 0),
         RGBAColor(r: 253, g: 216, b: 53),
         RGBAColor(r: 67, g: 160, b: 71),
@@ -703,9 +703,14 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var activeColorIndex: Int
     public var lastTool: AnnotationTool
     public var defaultLineWidth: Double
+    public var defaultFillEnabled: Bool
     public var defaultBlurRadius: Double
     public var defaultFontSize: Double
     public var defaultFontFamily: String
+    public var defaultFontBold: Bool
+    public var defaultFontItalic: Bool
+    public var defaultNumberFontSize: Double
+    public var styleDefaultsMigratedV2: Bool
     public var windowSnap: Bool
     public var confirmCancel: Bool
     public var showCompletionToast: Bool
@@ -734,10 +739,15 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         swatchColors: [RGBAColor] = ColorPalette.defaultSwatches,
         activeColorIndex: Int = 1,
         lastTool: AnnotationTool = .rect,
-        defaultLineWidth: Double = 4.0,
+        defaultLineWidth: Double = 2.0,
+        defaultFillEnabled: Bool = false,
         defaultBlurRadius: Double = 16.0,
         defaultFontSize: Double = 24.0,
         defaultFontFamily: String = "PingFang SC",
+        defaultFontBold: Bool = false,
+        defaultFontItalic: Bool = false,
+        defaultNumberFontSize: Double = 20.0,
+        styleDefaultsMigratedV2: Bool = true,
         windowSnap: Bool = true,
         confirmCancel: Bool = true,
         showCompletionToast: Bool = true,
@@ -766,9 +776,14 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.activeColorIndex = max(0, min(ColorPalette.swatchCount - 1, activeColorIndex))
         self.lastTool = lastTool
         self.defaultLineWidth = defaultLineWidth
+        self.defaultFillEnabled = defaultFillEnabled
         self.defaultBlurRadius = defaultBlurRadius
         self.defaultFontSize = defaultFontSize
         self.defaultFontFamily = defaultFontFamily
+        self.defaultFontBold = defaultFontBold
+        self.defaultFontItalic = defaultFontItalic
+        self.defaultNumberFontSize = defaultNumberFontSize
+        self.styleDefaultsMigratedV2 = styleDefaultsMigratedV2
         self.windowSnap = windowSnap
         self.confirmCancel = confirmCancel
         self.showCompletionToast = showCompletionToast
@@ -788,8 +803,10 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case autoStart, theme, hotkeys, toolKeys, pinPosition, pinBorder, pinMaxCount, uiScale
-        case swatchColors, activeColorIndex, lastTool, defaultLineWidth, defaultBlurRadius
-        case defaultFontSize, defaultFontFamily, windowSnap, confirmCancel, showCompletionToast
+        case swatchColors, activeColorIndex, lastTool, defaultLineWidth, defaultFillEnabled
+        case defaultBlurRadius, defaultFontSize, defaultFontFamily, defaultFontBold, defaultFontItalic, defaultNumberFontSize
+        case styleDefaultsMigratedV2
+        case windowSnap, confirmCancel, showCompletionToast
         case toolbar, nameStyle, lastSaveFormat, lastSaveDirectory, askBeforeSave
         case smartPngCompression, pngCompressionQuality, compressClipboardPng
         case longshotMaxHeight, autoCheckUpdate, skippedVersion, ocr
@@ -806,14 +823,30 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.pinBorder = try c.decodeIfPresent(Bool.self, forKey: .pinBorder) ?? d.pinBorder
         self.pinMaxCount = try c.decodeIfPresent(Int.self, forKey: .pinMaxCount) ?? d.pinMaxCount
         self.uiScale = try c.decodeIfPresent(UiScaleSetting.self, forKey: .uiScale) ?? d.uiScale
-        let decodedSwatches = try c.decodeIfPresent([RGBAColor].self, forKey: .swatchColors) ?? d.swatchColors
-        self.swatchColors = decodedSwatches.count == ColorPalette.swatchCount ? decodedSwatches : ColorPalette.defaultSwatches
+        let alreadyMigratedV2 = try c.decodeIfPresent(Bool.self, forKey: .styleDefaultsMigratedV2) ?? false
+        var decodedSwatches = try c.decodeIfPresent([RGBAColor].self, forKey: .swatchColors) ?? d.swatchColors
+        if decodedSwatches.count != ColorPalette.swatchCount {
+            decodedSwatches = ColorPalette.defaultSwatches
+        } else if !alreadyMigratedV2 && decodedSwatches[1] == RGBAColor(r: 229, g: 57, b: 53) {
+            decodedSwatches[1] = RGBAColor(r: 255, g: 0, b: 0)
+        }
+        self.swatchColors = decodedSwatches
         self.activeColorIndex = max(0, min(ColorPalette.swatchCount - 1, try c.decodeIfPresent(Int.self, forKey: .activeColorIndex) ?? d.activeColorIndex))
         self.lastTool = try c.decodeIfPresent(AnnotationTool.self, forKey: .lastTool) ?? d.lastTool
-        self.defaultLineWidth = try c.decodeIfPresent(Double.self, forKey: .defaultLineWidth) ?? d.defaultLineWidth
+        let rawLineWidth = try c.decodeIfPresent(Double.self, forKey: .defaultLineWidth)
+        if !alreadyMigratedV2 && rawLineWidth == 4.0 {
+            self.defaultLineWidth = 2.0
+        } else {
+            self.defaultLineWidth = rawLineWidth ?? d.defaultLineWidth
+        }
+        self.defaultFillEnabled = try c.decodeIfPresent(Bool.self, forKey: .defaultFillEnabled) ?? d.defaultFillEnabled
         self.defaultBlurRadius = try c.decodeIfPresent(Double.self, forKey: .defaultBlurRadius) ?? d.defaultBlurRadius
         self.defaultFontSize = try c.decodeIfPresent(Double.self, forKey: .defaultFontSize) ?? d.defaultFontSize
         self.defaultFontFamily = try c.decodeIfPresent(String.self, forKey: .defaultFontFamily) ?? d.defaultFontFamily
+        self.defaultFontBold = try c.decodeIfPresent(Bool.self, forKey: .defaultFontBold) ?? d.defaultFontBold
+        self.defaultFontItalic = try c.decodeIfPresent(Bool.self, forKey: .defaultFontItalic) ?? d.defaultFontItalic
+        self.defaultNumberFontSize = try c.decodeIfPresent(Double.self, forKey: .defaultNumberFontSize) ?? d.defaultNumberFontSize
+        self.styleDefaultsMigratedV2 = true
         self.windowSnap = try c.decodeIfPresent(Bool.self, forKey: .windowSnap) ?? d.windowSnap
         self.confirmCancel = try c.decodeIfPresent(Bool.self, forKey: .confirmCancel) ?? d.confirmCancel
         self.showCompletionToast = try c.decodeIfPresent(Bool.self, forKey: .showCompletionToast) ?? d.showCompletionToast
@@ -863,6 +896,10 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         sanitized.activeColorIndex = max(0, min(ColorPalette.swatchCount - 1, sanitized.activeColorIndex))
         sanitized.pinMaxCount = max(1, min(50, sanitized.pinMaxCount))
         sanitized.longshotMaxHeight = max(2000, min(100000, sanitized.longshotMaxHeight))
+        if let rawObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           (rawObj["styleDefaultsMigratedV2"] as? Bool) != true {
+            try? sanitized.save(to: url)
+        }
         return sanitized
     }
 

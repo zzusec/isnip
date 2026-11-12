@@ -375,4 +375,53 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertTrue(roundtrip.askBeforeSave)
         XCTAssertEqual(roundtrip.lastSaveDirectory, "/tmp/isnip-custom")
     }
+
+    func testPureRedThinDefaultMigrationAndFullOptionPersistence() throws {
+        let fresh = AirSnipConfig()
+        XCTAssertEqual(fresh.swatchColors[1], RGBAColor(r: 255, g: 0, b: 0))
+        XCTAssertEqual(fresh.activeColorIndex, 1)
+        XCTAssertEqual(fresh.defaultLineWidth, 2.0)
+        XCTAssertFalse(fresh.defaultFillEnabled)
+        XCTAssertFalse(fresh.defaultFontBold)
+        XCTAssertFalse(fresh.defaultFontItalic)
+        XCTAssertEqual(fresh.defaultNumberFontSize, 20.0)
+
+        // Legacy v0.3.4 config with old #E53935 (229,57,53) and 4px migrates once to #FF0000 and 2px
+        let legacyJSON = Data(#"""
+        {
+          "defaultLineWidth": 4,
+          "swatchColors": [
+            {"r":255,"g":255,"b":255,"a":255},
+            {"r":229,"g":57,"b":53,"a":255},
+            {"r":251,"g":140,"b":0,"a":255},
+            {"r":67,"g":160,"b":71,"a":255},
+            {"r":30,"g":136,"b":229,"a":255}
+          ]
+        }
+        """#.utf8)
+        var migrated = try JSONDecoder().decode(AirSnipConfig.self, from: legacyJSON)
+        XCTAssertEqual(migrated.swatchColors[1], RGBAColor(r: 255, g: 0, b: 0))
+        XCTAssertEqual(migrated.defaultLineWidth, 2.0)
+        XCTAssertTrue(migrated.styleDefaultsMigratedV2)
+
+        // Subsequent user option changes (including choosing 4px medium or fill) persist faithfully
+        migrated.defaultLineWidth = 4.0
+        migrated.defaultFillEnabled = true
+        migrated.defaultBlurRadius = 28.0
+        migrated.defaultFontSize = 30.0
+        migrated.defaultFontBold = true
+        migrated.defaultFontItalic = true
+        migrated.defaultNumberFontSize = 26.0
+        migrated.activeColorIndex = 4
+        let saved = try JSONEncoder().encode(migrated)
+        let reloaded = try JSONDecoder().decode(AirSnipConfig.self, from: saved)
+        XCTAssertEqual(reloaded.defaultLineWidth, 4.0)
+        XCTAssertTrue(reloaded.defaultFillEnabled)
+        XCTAssertEqual(reloaded.defaultBlurRadius, 28.0)
+        XCTAssertEqual(reloaded.defaultFontSize, 30.0)
+        XCTAssertTrue(reloaded.defaultFontBold)
+        XCTAssertTrue(reloaded.defaultFontItalic)
+        XCTAssertEqual(reloaded.defaultNumberFontSize, 26.0)
+        XCTAssertEqual(reloaded.activeColorIndex, 4)
+    }
 }

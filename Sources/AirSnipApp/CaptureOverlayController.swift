@@ -588,10 +588,14 @@ final class OverlayCanvasView: NSView {
         let cfg = coordinator.config
         self.activeTool = nil
         self.activeColorIndex = cfg.toolbar.settleColorIndex(cfg.activeColorIndex)
+        self.fillEnabled = cfg.defaultFillEnabled
         self.currentLineWidth = cfg.defaultLineWidth
         self.currentBlurRadius = cfg.defaultBlurRadius
         self.currentFontSize = cfg.defaultFontSize
+        self.currentNumberFontSize = cfg.defaultNumberFontSize
         self.currentFontFamily = cfg.defaultFontFamily
+        self.textBold = cfg.defaultFontBold
+        self.textItalic = cfg.defaultFontItalic
         self.selection = lockedInitialSelection
         self.selectionLocked = (lockedInitialSelection != nil)
 
@@ -3149,19 +3153,23 @@ final class OverlayCanvasView: NSView {
                 case .blur(let a, let b, let br, let cr):
                     let nextR = max(4.0, min(64.0, br + step * 2.0))
                     currentBlurRadius = nextR
+                    coordinator?.mutateConfig { $0.defaultBlurRadius = nextR }
                     obj.kind = .blur(a: a, b: b, blurRadius: nextR, cornerRadius: cr)
                 case .text(let pos, let txt, let fs, let ff, let bold, let italic, _, _):
                     let nextFS = max(10.0, min(96.0, fs + step * 2.0))
                     currentFontSize = nextFS
+                    coordinator?.mutateConfig { $0.defaultFontSize = nextFS }
                     let m = AnnotationRenderer.measureText(txt, fontFamily: ff, fontSize: nextFS, bold: bold, italic: italic)
                     obj.kind = .text(pos: pos, text: txt, fontSize: nextFS, fontFamily: ff, bold: bold, italic: italic, measuredWidth: m.width, measuredHeight: m.height)
                 case .number(let center, let tip, let n, let fs):
                     let nextFS = max(12.0, min(64.0, fs + step * 2.0))
                     currentNumberFontSize = nextFS
+                    coordinator?.mutateConfig { $0.defaultNumberFontSize = nextFS }
                     obj.kind = .number(center: center, tip: tip, number: n, fontSize: nextFS)
                 default:
                     let nextW = max(1.0, min(36.0, obj.style.lineWidth + step))
                     currentLineWidth = nextW
+                    coordinator?.mutateConfig { $0.defaultLineWidth = nextW }
                     obj.style.lineWidth = nextW
                 }
             }
@@ -3172,13 +3180,21 @@ final class OverlayCanvasView: NSView {
         guard let tool = activeTool else { return }
         switch tool {
         case .blur:
-            currentBlurRadius = max(4.0, min(64.0, currentBlurRadius + step * 2.0))
+            let nextR = max(4.0, min(64.0, currentBlurRadius + step * 2.0))
+            currentBlurRadius = nextR
+            coordinator?.mutateConfig { $0.defaultBlurRadius = nextR }
         case .text:
-            currentFontSize = max(10.0, min(96.0, currentFontSize + step * 2.0))
+            let nextFS = max(10.0, min(96.0, currentFontSize + step * 2.0))
+            currentFontSize = nextFS
+            coordinator?.mutateConfig { $0.defaultFontSize = nextFS }
         case .number:
-            currentNumberFontSize = max(12.0, min(64.0, currentNumberFontSize + step * 2.0))
+            let nextFS = max(12.0, min(64.0, currentNumberFontSize + step * 2.0))
+            currentNumberFontSize = nextFS
+            coordinator?.mutateConfig { $0.defaultNumberFontSize = nextFS }
         default:
-            currentLineWidth = max(1.0, min(36.0, currentLineWidth + step))
+            let nextW = max(1.0, min(36.0, currentLineWidth + step))
+            currentLineWidth = nextW
+            coordinator?.mutateConfig { $0.defaultLineWidth = nextW }
         }
         needsDisplay = true
     }
@@ -3331,6 +3347,7 @@ final class OverlayCanvasView: NSView {
 
     private func selectLineWidthPreset(_ width: Double) {
         currentLineWidth = width
+        coordinator?.mutateConfig { $0.defaultLineWidth = width }
         if let selID = document.selectedID {
             document.updateObject(id: selID, recordUndo: true) { $0.style.lineWidth = width }
         }
@@ -3339,6 +3356,7 @@ final class OverlayCanvasView: NSView {
 
     private func selectBlurRadiusPreset(_ radius: Double) {
         currentBlurRadius = radius
+        coordinator?.mutateConfig { $0.defaultBlurRadius = radius }
         if let selID = document.selectedID {
             document.updateObject(id: selID, recordUndo: true) { obj in
                 if case .blur(let a, let b, _, let cr) = obj.kind {
@@ -3402,19 +3420,30 @@ final class OverlayCanvasView: NSView {
     }
 
     private func toggleFill() {
-        fillEnabled.toggle()
-        if let selID = document.selectedID {
+        let newFill: Bool
+        if let selID = document.selectedID, let selObj = document.selectedObject {
+            switch selObj.kind {
+            case .rect(_, _, _, let f), .ellipse(_, _, let f):
+                newFill = !f
+            default:
+                newFill = !fillEnabled
+            }
+            fillEnabled = newFill
             document.updateObject(id: selID, recordUndo: true) { obj in
                 switch obj.kind {
-                case .rect(let a, let b, let r, let f):
-                    obj.kind = .rect(a: a, b: b, cornerRadius: r, filled: !f)
-                case .ellipse(let a, let b, let f):
-                    obj.kind = .ellipse(a: a, b: b, filled: !f)
+                case .rect(let a, let b, let r, _):
+                    obj.kind = .rect(a: a, b: b, cornerRadius: r, filled: newFill)
+                case .ellipse(let a, let b, _):
+                    obj.kind = .ellipse(a: a, b: b, filled: newFill)
                 default:
                     break
                 }
             }
+        } else {
+            fillEnabled.toggle()
+            newFill = fillEnabled
         }
+        coordinator?.mutateConfig { $0.defaultFillEnabled = newFill }
         needsDisplay = true
     }
 
@@ -3464,14 +3493,18 @@ final class OverlayCanvasView: NSView {
     }
 
     private func toggleBold() {
-        textBold.toggle()
-        updateSelectedTextObject { _, txt, fs, ff, b, i in (txt, fs, ff, !b, i) }
+        let nextBold = !currentEffectiveTextAttributes.bold
+        textBold = nextBold
+        coordinator?.mutateConfig { $0.defaultFontBold = nextBold }
+        updateSelectedTextObject { _, txt, fs, ff, _, i in (txt, fs, ff, nextBold, i) }
         needsDisplay = true
     }
 
     private func toggleItalic() {
-        textItalic.toggle()
-        updateSelectedTextObject { _, txt, fs, ff, b, i in (txt, fs, ff, b, !i) }
+        let nextItalic = !currentEffectiveTextAttributes.italic
+        textItalic = nextItalic
+        coordinator?.mutateConfig { $0.defaultFontItalic = nextItalic }
+        updateSelectedTextObject { _, txt, fs, ff, b, _ in (txt, fs, ff, b, nextItalic) }
         needsDisplay = true
     }
 
@@ -3479,6 +3512,7 @@ final class OverlayCanvasView: NSView {
         let cur = currentEffectiveTextAttributes.size
         let next = max(10.0, min(96.0, cur + delta))
         currentFontSize = next
+        coordinator?.mutateConfig { $0.defaultFontSize = next }
         updateSelectedTextObject { _, txt, _, ff, b, i in (txt, next, ff, b, i) }
         needsDisplay = true
     }

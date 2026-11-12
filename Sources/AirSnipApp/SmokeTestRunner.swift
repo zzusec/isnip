@@ -18,6 +18,8 @@ public enum SmokeTestRunner {
             guard cfg.smartPngCompression == true,
                   cfg.compressClipboardPng == true,
                   cfg.askBeforeSave == false,
+                  cfg.swatchColors[1] == RGBAColor(r: 255, g: 0, b: 0),
+                  cfg.defaultLineWidth == 2.0,
                   cfg.pngCompressionQuality == .visuallyLossless,
                   cfg.nameStyle.formatBaseName().hasPrefix("isnip-") else {
                 fputs("FAIL: Default iSnip config or smartPngCompression default mismatch\n", stderr)

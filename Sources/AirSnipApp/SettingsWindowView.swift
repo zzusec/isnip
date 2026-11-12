@@ -1046,6 +1046,15 @@ private struct EditorDefaultsPane: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 11)
+                SettingsRowDivider()
+
+                SettingsSwitchRow(
+                    title: "实心填充",
+                    isOn: Binding(
+                        get: { app.config.defaultFillEnabled },
+                        set: { v in app.updateConfig { $0.defaultFillEnabled = v } }
+                    )
+                )
             }
 
             SettingsSectionCard("预设颜色") {
@@ -1098,6 +1107,8 @@ private struct EditorDefaultsPane: View {
                             app.updateConfig {
                                 $0.swatchColors = ColorPalette.defaultSwatches
                                 $0.activeColorIndex = 1
+                                $0.defaultLineWidth = 2.0
+                                $0.defaultFillEnabled = false
                             }
                         }
                         .controlSize(.small)
