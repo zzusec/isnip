@@ -44,13 +44,28 @@ if pgrep -f "$target/Contents/MacOS/AirSnip" >/dev/null 2>&1; then
   done
 fi
 
+new_team=$(codesign -dv "$built" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2}')
+reset_tcc=0
+
 if [ -e "$target" ]; then
   old=$(plutil -extract CFBundleShortVersionString raw "$target/Contents/Info.plist" 2>/dev/null || echo old)
+  old_team=$(codesign -dv "$target" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2}')
+  if [ "$old_team" != "$new_team" ] || [ "$new_team" = "not set" ] || [ -z "$new_team" ]; then
+    reset_tcc=1
+  fi
   trash="$HOME/.Trash/AirSnip-$old-$(date +%Y%m%d%H%M%S).app"
   mv "$target" "$trash"
   echo "旧版 ${old} 已移到废纸篓：${trash}"
 fi
 
 ditto "$built" "$target"
+if [ "$reset_tcc" = 1 ]; then
+  echo "检测到应用签名标识变更（${old_team:-none} -> ${new_team:-none}），正在清理失效的旧版录屏权限缓存…"
+  /usr/bin/tccutil reset ScreenCapture "$bundle_id" >/dev/null 2>&1 || true
+fi
 echo "已安装 v${version}（build ${build}）到 ${target}"
-open "$target"
+if [ "$reset_tcc" = 1 ]; then
+  open "$target" --args --request-screen-capture
+else
+  open "$target"
+fi

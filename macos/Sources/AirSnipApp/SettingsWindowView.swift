@@ -255,8 +255,11 @@ private struct GeneralSettingsPane: View {
                     }
                     Spacer()
                     if !ScreenCaptureService.hasScreenCapturePermission() {
-                        Button("请求授权") {
-                            _ = ScreenCaptureService.requestScreenCapturePermissionIfNeeded()
+                        Button("打开系统设置") {
+                            ScreenCaptureService.openScreenCaptureSystemSettings()
+                        }
+                        Button("重置权限并重开") {
+                            ScreenCaptureService.resetScreenCapturePermissionAndRelaunch()
                         }
                     } else {
                         Image(systemName: "checkmark.seal.fill")

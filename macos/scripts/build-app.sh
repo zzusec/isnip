@@ -23,5 +23,19 @@ find "$app" -name .DS_Store -delete
 find "$app" -name '._*' -delete
 xattr -cr "$app"
 
-codesign --force --deep --sign - "$app"
+sign_identity=${AIRSNIP_SIGN_IDENTITY:-}
+if [ -z "$sign_identity" ]; then
+  sign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk '/"Developer ID Application: /{print $2; exit}')
+fi
+if [ -z "$sign_identity" ]; then
+  sign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk '/"Apple Development: /{id=$2} END{if (id) print id}')
+fi
+if [ -z "$sign_identity" ]; then
+  sign_identity=-
+fi
+
+echo "Signing AirSnip.app with identity: $sign_identity" >&2
+codesign --force --deep --sign "$sign_identity" "$app"
 printf '%s\n' "$app"

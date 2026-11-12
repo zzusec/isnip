@@ -1,5 +1,12 @@
 # Changelog
 
+## macOS v0.2.2
+
+- 修复升级版本后「系统设置 → 录屏与系统录音」开关已打开但仍反复提示需要开启权限的问题：
+  - **切换为 Apple 证书固定签名要求（消除 Ad-hoc `cdhash` 升级失效）**：`build-app.sh` 自动优先使用本机 `Developer ID Application` / `Apple Development` 证书签名，使 macOS TCC 按 `Bundle ID + 开发者证书`（而非单次二进制哈希 `cdhash`）绑定权限，后续版本升级永久保留录屏授权。
+  - **移除 `CGPreflightScreenCaptureAccess()` 进程内负缓存前置拦截**：改为直接通过 `ScreenCaptureKit`（`SCShareableContent` / `SCScreenshotManager`）发起实时抓屏校验，避免用户在系统设置打开开关后因 SkyLight 进程内缓存仍被误判未授权。
+  - **安装脚本与权限引导自愈增强**：`install-local.sh` 在检测到旧版 Ad-hoc 签名切换至证书签名时自动执行 `tccutil reset ScreenCapture io.zzusec.airsnip` 清除失效的旧版哈希残留并重新唤起干净授权；权限提示框与设置页新增「重启 AirSnip 以生效」和「重置权限记录并重新授权」一键修复按钮。
+
 ## macOS v0.2.1
 
 - 修复菜单栏点击「截图」或按下全局热键后无可见反应的问题：

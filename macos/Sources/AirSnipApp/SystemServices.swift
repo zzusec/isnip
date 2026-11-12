@@ -33,18 +33,72 @@ public enum ScreenCaptureService {
         return CGRequestScreenCaptureAccess()
     }
 
-    public static func showPermissionGuidanceAlert() {
+    public static func openScreenCaptureSystemSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    public static func relaunchApplication(extraArguments: [String] = []) {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let bundlePath = Bundle.main.bundleURL.path
+        let script = """
+        pid="$1"; app="$2"; shift 2
+        while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
+        if [ "$#" -gt 0 ]; then
+          open "$app" --args "$@"
+        else
+          open "$app"
+        fi
+        """
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+        proc.arguments = ["-c", script, "relaunch", "\(pid)", bundlePath] + extraArguments
+        try? proc.run()
+        NSApp.terminate(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            exit(0)
+        }
+    }
+
+    public static func resetScreenCapturePermissionAndRelaunch() {
+        if let bundleID = Bundle.main.bundleIdentifier {
+            let reset = Process()
+            reset.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            reset.arguments = ["reset", "ScreenCapture", bundleID]
+            try? reset.run()
+            reset.waitUntilExit()
+        }
+        relaunchApplication(extraArguments: ["--request-screen-capture"])
+    }
+
+    public static func showPermissionGuidanceAlert(error: Error? = nil) {
+        let _ = error
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "需要开启「屏幕录制」权限"
-        alert.informativeText = "AirSnip 需要屏幕录制权限才能冻结画面并进行框选截图、长截图与离线 OCR。\n\n所有图像仅在本机内存中处理，绝不联网上传。授权后请重新触发截图。"
+        alert.messageText = "「屏幕录制」权限尚未生效"
+        alert.informativeText = """
+        AirSnip 抓屏被系统拦截（所有图像仅在本机内存中处理，绝不联网上传）：
+
+        1. 若您刚在「系统设置 → 录屏与系统录音」中开启了开关：请点击「重启 AirSnip 以生效」。
+        2. 若系统设置里的 AirSnip 开关原本就是开启状态仍提示此窗口：这是因为旧版本签名记录残留导致系统校验失效，请点击「重置权限记录并重新授权」一键修复。
+        3. 若尚未开启权限：请点击「打开系统设置」开启 AirSnip。
+        """
+        alert.addButton(withTitle: "重启 AirSnip 以生效")
+        alert.addButton(withTitle: "重置权限记录并重新授权")
         alert.addButton(withTitle: "打开系统设置")
         alert.addButton(withTitle: "稍后")
-        if alert.runModal() == .alertFirstButtonReturn {
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                NSWorkspace.shared.open(url)
-            }
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            relaunchApplication()
+        case .alertSecondButtonReturn:
+            resetScreenCapturePermissionAndRelaunch()
+        case .alertThirdButtonReturn:
+            openScreenCaptureSystemSettings()
+        default:
+            break
         }
     }
 

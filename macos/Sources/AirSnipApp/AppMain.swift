@@ -262,14 +262,6 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             }
         }
 
-        if !ScreenCaptureService.hasScreenCapturePermission() {
-            let granted = ScreenCaptureService.requestScreenCapturePermissionIfNeeded()
-            if !granted && !ScreenCaptureService.hasScreenCapturePermission() {
-                ScreenCaptureService.showPermissionGuidanceAlert()
-                return
-            }
-        }
-
         isCapturingSnapshots = true
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -284,7 +276,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 self.activeCaptureSession = coordinator
                 coordinator.startWithSnapshots(snapshots)
             } catch {
-                ScreenCaptureService.showPermissionGuidanceAlert()
+                ScreenCaptureService.showPermissionGuidanceAlert(error: error)
             }
         }
     }
@@ -454,6 +446,9 @@ public final class AirSnipAppDelegate: NSObject, NSApplicationDelegate {
 
         if CommandLine.arguments.contains("--open-settings") {
             ctrl.openSettings()
+        }
+        if CommandLine.arguments.contains("--request-screen-capture") {
+            _ = ScreenCaptureService.requestScreenCapturePermissionIfNeeded()
         }
     }
 
