@@ -377,7 +377,7 @@ public enum PngSmartCompressor {
         candidates.append(bundleHelpers)
 
         // Source-tree fallback (used during `swift test` and local CLI development):
-        // #filePath = .../macos/Sources/AirSnipCore/ImageCodecs.swift -> .../macos/Vendor/Helpers/<name>
+        // #filePath = .../Sources/AirSnipCore/ImageCodecs.swift -> .../Vendor/Helpers/<name>
         let sourceRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()

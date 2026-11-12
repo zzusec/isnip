@@ -1,6 +1,6 @@
 #!/bin/sh
 # 临时分支打包 → 公开仓库 zzusec/isnip 发布安装包 → 匿名 SHA-256 验收 → 普通快进 main → 本机安装。
-# 用法：sh macos/scripts/publish-release.sh [版本号] [--no-install]
+# 用法：sh scripts/publish-release.sh [版本号] [--no-install]
 set -eu
 
 install_local=1
@@ -17,14 +17,14 @@ set -- $rest
 
 REPO=zzusec/isnip
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 die() { echo "publish-release: $*" >&2; exit 1; }
 
 [ "$(uname -s)" = Darwin ] || die "只能在 macOS 上执行"
 
-plist=macos/Info.plist
+plist=Info.plist
 declared=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")
 version=${1:-$declared}
 version=${version#v}
@@ -72,11 +72,11 @@ code=$(api -o /dev/null -w '%{http_code}' "https://api.github.com/repos/$REPO/re
 [ "$code" = 404 ] || die "${REPO} 已存在 v${version}（HTTP ${code}）：请递增版本号"
 
 echo "== 打包 iSnip v${version} =="
-sh macos/scripts/release-app.sh "$version"
+sh scripts/release-app.sh "$version"
 [ "$(git rev-parse HEAD)" = "$sha" ] || die "打包期间 HEAD 已改变；未创建 Release"
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die "打包期间源码已改变；未创建 Release"
 
-dist=$root/macos/dist
+dist=$root/dist
 base=isnip-macos-arm64-v$version
 assets="$base.dmg $base.dmg.sha256 $base.zip $base.zip.sha256"
 for f in $assets; do [ -s "$dist/$f" ] || die "缺少产物 ${dist}/${f}"; done
@@ -165,4 +165,4 @@ git push origin "$sha:refs/heads/main" || die "main 快进更新失败；请检�
 [ "$install_local" = 1 ] || { echo "（--no-install：跳过本机安装）"; exit 0; }
 echo
 echo "== 安装到本机 =="
-sh macos/scripts/install-local.sh --built "$dist/iSnip.app"
+sh scripts/install-local.sh --built "$dist/iSnip.app"

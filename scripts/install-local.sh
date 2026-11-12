@@ -1,5 +1,5 @@
 #!/bin/sh
-# 用法：sh macos/scripts/install-local.sh [--no-pull | --built <已打包的 .app>]
+# 用法：sh scripts/install-local.sh [--no-pull | --built <已打包的 .app>]
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -13,7 +13,7 @@ case ${1:-} in
     ;;
   --no-pull) ;;
   *)
-    git -C "$root/.." pull --ff-only
+    git -C "$root" pull --ff-only
     exec sh "$root/scripts/install-local.sh" --no-pull
     ;;
 esac

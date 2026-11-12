@@ -7,10 +7,10 @@ import re
 import subprocess
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-PLIST_PATH = ROOT / "macos" / "Info.plist"
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+PLIST_PATH = ROOT / "Info.plist"
 CHANGELOG_PATH = ROOT / "CHANGELOG.md"
-PUBLISH_SCRIPT = ROOT / "macos" / "scripts" / "publish-release.sh"
+PUBLISH_SCRIPT = ROOT / "scripts" / "publish-release.sh"
 
 
 def fail(msg: str) -> None:
@@ -60,7 +60,7 @@ def main() -> None:
     if "--force" in script_text or "push -f" in script_text:
         fail("publish-release.sh must never force-push")
 
-    scripts_dir = ROOT / "macos" / "scripts"
+    scripts_dir = ROOT / "scripts"
     for sh_file in sorted(scripts_dir.glob("*.sh")):
         proc = subprocess.run(["/bin/sh", "-n", str(sh_file)], capture_output=True, text=True)
         if proc.returncode != 0:
