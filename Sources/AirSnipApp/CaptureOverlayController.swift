@@ -161,6 +161,11 @@ public final class CaptureSessionCoordinator {
         return ctrl.canvasView.renderIsolatedWindowVerificationSample(windowImage: windowImage, rect: rect, includeShadow: includeShadow)
     }
 
+    public func renderStandaloneAnnotatedOutputSample() -> CGImage? {
+        guard let ctrl = screenControllers.first else { return nil }
+        return ctrl.canvasView.renderStandaloneAnnotatedOutputSample()
+    }
+
     public func refocus() {
         screenControllers.first?.focusWindow()
     }
@@ -263,12 +268,15 @@ public final class CaptureSessionCoordinator {
         let fullW = max(1, Int((sFrame.width * CGFloat(scale)).rounded()))
         let fullH = max(1, Int((sFrame.height * CGFloat(scale)).rounded()))
 
-        // Fit image nicely within 85% of screen if very tall (e.g., longshot)
+        // Fit image nicely within 85% of screen if very tall (e.g., longshot), while preserving 100% original resolution for baking/export
         let maxPxW = Double(fullW) * 0.88
         let maxPxH = Double(fullH) * 0.82
         let fitRatio = min(1.0, min(maxPxW / Double(cgImage.width), maxPxH / Double(cgImage.height)))
         let dispPxW = max(16.0, (Double(cgImage.width) * fitRatio).rounded())
-        let dispPxH = max(16.0, (Double(cgImage.height) * fitRatio).rounded())
+        let dispW = dispPxW / scale
+        let effectivePixelScale = Double(cgImage.width) / max(1.0, dispW)
+        let dispH = Double(cgImage.height) / effectivePixelScale
+        let dispPxH = dispH * scale
 
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(
@@ -301,8 +309,8 @@ public final class CaptureSessionCoordinator {
         let selTopDown = ASRect(
             x: drawX / scale,
             y: (Double(fullH) - drawY - dispPxH) / scale,
-            width: dispPxW / scale,
-            height: dispPxH / scale
+            width: dispW,
+            height: dispH
         )
 
         let snap = CapturedScreenSnapshot(
@@ -316,6 +324,13 @@ public final class CaptureSessionCoordinator {
         )
 
         let ctrl = OverlayScreenController(snapshot: snap, coordinator: self, lockedInitialSelection: selTopDown)
+        if let srcBuf = PixelBufferRGBA(cgImage: cgImage) {
+            ctrl.canvasView.attachStandaloneSourceImage(
+                cgImage: cgImage,
+                rawBuffer: srcBuf,
+                pixelScale: effectivePixelScale
+            )
+        }
         screenControllers.append(ctrl)
         ctrl.show()
         ctrl.focusWindow()
@@ -511,6 +526,7 @@ final class OverlayCanvasView: NSView {
         let pixelScale: Double
         var includeShadow: Bool
         let ownerName: String
+        var isWindowCapture: Bool = true
     }
 
     private var snapshot: CapturedScreenSnapshot
@@ -688,6 +704,36 @@ final class OverlayCanvasView: NSView {
         document.clearAll()
         colorPicker = nil
         needsDisplay = true
+    }
+
+    func attachStandaloneSourceImage(cgImage: CGImage, rawBuffer: PixelBufferRGBA, pixelScale: Double) {
+        isolatedWindowCapture = IsolatedWindowCapture(
+            rawImage: cgImage,
+            rawBuffer: rawBuffer,
+            pixelScale: pixelScale,
+            includeShadow: false,
+            ownerName: "",
+            isWindowCapture: false
+        )
+        needsDisplay = true
+    }
+
+    func renderStandaloneAnnotatedOutputSample() -> CGImage? {
+        guard let sel = selection else { return nil }
+        document.clearAll()
+        document.add(
+            AnnotationObject(
+                style: AnnotationStyle(color: RGBAColor(r: 255, g: 0, b: 0), lineWidth: 2.0),
+                kind: .rect(
+                    a: ASPoint(sel.minX + 8, sel.minY + 8),
+                    b: ASPoint(min(sel.maxX - 8, sel.minX + 68), min(sel.maxY - 8, sel.minY + 48)),
+                    cornerRadius: 4,
+                    filled: false
+                )
+            ),
+            select: false
+        )
+        return bakeCurrentSelectionOutput(applyWindowShadow: true)
     }
 
     func renderIsolatedWindowVerificationSample(windowImage: CGImage, rect: ASRect, includeShadow: Bool) -> CGImage? {
@@ -1058,7 +1104,7 @@ final class OverlayCanvasView: NSView {
                     AnnotationRenderer.drawSelectionGizmos(in: ctx, for: selObj)
                 }
 
-                let shadowTag = iso.includeShadow ? "" : " · 无阴影"
+                let shadowTag = (iso.isWindowCapture && !iso.includeShadow) ? " · 无阴影" : ""
                 let pillText = iso.ownerName.isEmpty
                     ? "\(iso.rawImage.width) × \(iso.rawImage.height)\(shadowTag)"
                     : "\(iso.ownerName) · \(iso.rawImage.width) × \(iso.rawImage.height)\(shadowTag)"
@@ -3558,7 +3604,7 @@ final class OverlayCanvasView: NSView {
         case kVK_Delete, kVK_ForwardDelete:
             if document.deleteSelected() {
                 needsDisplay = true
-            } else if isolatedWindowCapture != nil, document.isEmpty {
+            } else if let iso = isolatedWindowCapture, iso.isWindowCapture, document.isEmpty {
                 isolatedWindowCapture = nil
                 selection = nil
                 selectionLocked = false

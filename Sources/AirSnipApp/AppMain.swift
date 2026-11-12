@@ -430,21 +430,21 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             let _ = scale
             let showToast = cfg.showCompletionToast
             let cfgSaveURL = self?.configURL ?? AirSnipConfig.defaultConfigFileURL()
-            guard OutputService.saveImage(
+            guard let savedURL = OutputService.saveImage(
                 for: cgImg,
                 config: &cfg,
                 forceDialog: forceDialog,
                 configSaveURL: cfgSaveURL,
-                onFinalCompressed: { _, finalRes in
-                    guard showToast else { return }
-                    ToastHUD.show("已保存 · \(finalRes.compactBadgeSummary)")
+                onFinalCompressed: { fileURL, finalRes in
+                    guard showToast, finalRes.savedRatioPercent >= 3 else { return }
+                    ToastHUD.show("已保存 \(fileURL.lastPathComponent) · \(finalRes.compactBadgeSummary)")
                 }
-            ) != nil else {
+            ) else {
                 return false
             }
             self?.config = cfg
-            if cfg.showCompletionToast && !(cfg.lastSaveFormat == .png && cfg.smartPngCompression) {
-                ToastHUD.show("已保存")
+            if showToast {
+                ToastHUD.show("已保存 \(savedURL.lastPathComponent)")
             }
             return true
         }
@@ -509,24 +509,25 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 }
             }
         }
-        ls.onFinishSave = { [weak self] cgImg, scale in
+        ls.onFinishSave = { [weak self] cgImg, scale, forceDialog in
             guard let self else { return }
             self.activeLongshotSession = nil
             OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: self.config)
             var cfg = self.config
             let showToast = cfg.showCompletionToast
-            if OutputService.saveImage(
+            if let savedURL = OutputService.saveImage(
                 for: cgImg,
                 config: &cfg,
+                forceDialog: forceDialog,
                 configSaveURL: self.configURL,
-                onFinalCompressed: { _, finalRes in
-                    guard showToast else { return }
-                    ToastHUD.show("已保存 · \(finalRes.compactBadgeSummary)")
+                onFinalCompressed: { fileURL, finalRes in
+                    guard showToast, finalRes.savedRatioPercent >= 3 else { return }
+                    ToastHUD.show("已保存 \(fileURL.lastPathComponent) · \(finalRes.compactBadgeSummary)")
                 }
-            ) != nil {
+            ) {
                 self.config = cfg
-                if self.config.showCompletionToast && !(cfg.lastSaveFormat == .png && cfg.smartPngCompression) {
-                    ToastHUD.show("已保存")
+                if showToast {
+                    ToastHUD.show("已保存 \(savedURL.lastPathComponent)")
                 }
             }
         }

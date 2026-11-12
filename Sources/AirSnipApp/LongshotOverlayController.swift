@@ -9,6 +9,10 @@ private final class ControlBarPanel: NSPanel {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
+final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 private final class FullScreenBorderPanel: NSPanel {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
@@ -19,7 +23,7 @@ public final class LongshotSessionController: ObservableObject {
     @Published public private(set) var pixelHeight: Int = 0
     @Published public private(set) var segmentCount: Int = 0
     @Published public private(set) var canUndo: Bool = false
-    @Published public private(set) var statusHint: String = "Space 自动翻页 · 滚轮手动拼接 · Enter 完成"
+    @Published public private(set) var statusHint: String = "Space 自动翻页 · 滚轮手动拼接 · Enter 保存"
     @Published public private(set) var thumbnailImage: CGImage?
     @Published public private(set) var headerFooterHint: String?
     @Published public private(set) var isAutoScrolling: Bool = false
@@ -30,6 +34,7 @@ public final class LongshotSessionController: ObservableObject {
     private let screen: NSScreen
     private let viewportTopDown: ASRect
     private let backingScale: Double
+    private let initialFallbackCrop: PixelBufferRGBA
     private var config: AirSnipConfig
     private let autoStartRequested: Bool
 
@@ -40,6 +45,8 @@ public final class LongshotSessionController: ObservableObject {
     private var captureLoopTask: Task<Void, Never>?
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
+    private var globalScrollMonitor: Any?
+    private var isFinalizing: Bool = false
 
     private var pendingInitialDelayMs: UInt64 = 0
     private var pendingInitialWarp: Bool = false
@@ -49,7 +56,7 @@ public final class LongshotSessionController: ObservableObject {
 
     public var onSpeedChanged: ((LongshotScrollSpeed) -> Void)?
     public var onFinishCopy: ((CGImage, Double) -> Void)?
-    public var onFinishSave: ((CGImage, Double) -> Void)?
+    public var onFinishSave: ((CGImage, Double, Bool) -> Void)?
     public var onFinishEdit: ((CGImage, Double, NSScreen) -> Void)?
     public var onFinishOCR: ((CGImage) -> Void)?
     public var onCancel: (() -> Void)?
@@ -64,6 +71,7 @@ public final class LongshotSessionController: ObservableObject {
         self.screen = screen
         self.viewportTopDown = viewportTopDown
         self.backingScale = Double(screen.backingScaleFactor)
+        self.initialFallbackCrop = initialCrop
         self.config = config
         self.scrollSpeed = config.longshotScrollSpeed
         self.autoStartRequested = autoStartScroll
@@ -100,8 +108,10 @@ public final class LongshotSessionController: ObservableObject {
         isAutoScrolling = false
         captureLoopTask?.cancel()
         captureLoopTask = nil
+        GlobalHotkeyManager.shared?.unregisterTransientHotKeys()
         if let g = globalKeyMonitor { NSEvent.removeMonitor(g); globalKeyMonitor = nil }
         if let l = localKeyMonitor { NSEvent.removeMonitor(l); localKeyMonitor = nil }
+        if let s = globalScrollMonitor { NSEvent.removeMonitor(s); globalScrollMonitor = nil }
         borderWindow?.orderOut(nil)
         previewWindow?.orderOut(nil)
         controlWindow?.orderOut(nil)
@@ -135,8 +145,8 @@ public final class LongshotSessionController: ObservableObject {
         pendingInitialWarp = true
         isAutoScrolling = true
         statusHint = segmentCount > 0
-            ? "自动翻页中（已拼 \(segmentCount) 段）· Space 暂停"
-            : "自动翻页中 · Space 暂停 · Enter 完成"
+            ? "自动翻页中（已拼 \(segmentCount) 段）· Space 暂停 · Enter 保存"
+            : "自动翻页中 · Space 暂停 · Enter 保存"
     }
 
     public func pauseAutoScrolling(customHint: String? = nil) {
@@ -144,7 +154,7 @@ public final class LongshotSessionController: ObservableObject {
         if let customHint {
             statusHint = customHint
         } else if segmentCount > 0 {
-            statusHint = "已暂停（\(segmentCount) 段）· Space 继续 · Enter 完成"
+            statusHint = "已暂停（\(segmentCount) 段）· Space 继续 · Enter 保存"
         } else {
             statusHint = "已暂停 · Space 自动翻页或手动滚轮"
         }
@@ -235,13 +245,19 @@ public final class LongshotSessionController: ObservableObject {
             self.previewWindow = pWin
         }
 
-        // 3. Control bar window below (or above) viewport
-        let barW = min(max(560, sFrame.width - 24), 708)
+        // 3. Control bar window below (or above / cleanly inside bottom of) viewport, always respecting Dock & menu bar
+        let vis = screen.visibleFrame
+        let barW = min(max(560, vis.width - 24), 720)
         let barH: CGFloat = 54
-        let barX = max(sFrame.minX + 12, min(sFrame.maxX - barW - 12, vpAppKit.midX - barW * 0.5))
-        let barY: CGFloat = (vpAppKit.minY - barH - 12 >= sFrame.minY + 8)
-            ? (vpAppKit.minY - barH - 10)
-            : min(sFrame.maxY - barH - 10, vpAppKit.maxY + 10)
+        let barX = max(vis.minX + 12, min(vis.maxX - barW - 12, vpAppKit.midX - barW * 0.5))
+        let barY: CGFloat
+        if vpAppKit.minY - barH - 10 >= vis.minY + 6 {
+            barY = vpAppKit.minY - barH - 10
+        } else if vpAppKit.maxY + 10 + barH <= vis.maxY - 6 {
+            barY = vpAppKit.maxY + 10
+        } else {
+            barY = max(vis.minY + 14, vpAppKit.minY + 14)
+        }
 
         let cWin = ControlBarPanel(
             contentRect: NSRect(x: barX, y: barY, width: barW, height: barH),
@@ -255,32 +271,76 @@ public final class LongshotSessionController: ObservableObject {
         cWin.hasShadow = true
         cWin.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         cWin.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        cWin.contentView = NSHostingView(rootView: LongshotControlBarView(controller: self))
+        cWin.contentView = FirstMouseHostingView(rootView: LongshotControlBarView(controller: self))
         cWin.orderFrontRegardless()
         self.controlWindow = cWin
     }
 
     private func installKeyMonitors() {
-        let handleKey: (NSEvent) -> Bool = { [weak self] ev in
+        // 1. Register Carbon session hotkeys so `Space`, `Enter`, `Esc`, `⌘S`, `⌘C`, `⌘Z` are reliably intercepted
+        //    and consumed even when Chrome/Safari is focused (preventing browser PageDown / link click / Save Page As).
+        let carbonSpecs: [(id: UInt32, keyCode: Int, modifiers: UInt32)] = [
+            (101, kVK_Space, 0),
+            (102, kVK_Return, 0),
+            (103, kVK_Return, UInt32(optionKey)),
+            (104, kVK_ANSI_KeypadEnter, 0),
+            (105, kVK_ANSI_KeypadEnter, UInt32(optionKey)),
+            (106, kVK_Escape, 0),
+            (107, kVK_ANSI_S, UInt32(cmdKey)),
+            (108, kVK_ANSI_S, UInt32(cmdKey | shiftKey)),
+            (109, kVK_ANSI_S, UInt32(cmdKey | optionKey)),
+            (110, kVK_ANSI_C, UInt32(cmdKey)),
+            (111, kVK_ANSI_Z, UInt32(cmdKey)),
+        ]
+        let registeredIDs = GlobalHotkeyManager.shared?.registerTransientHotKeys(carbonSpecs) { [weak self] id in
+            guard let self else { return }
+            switch id {
+            case 101: self.toggleAutoScroll()
+            case 102, 104, 107: self.finishAndSave(forceDialog: false)
+            case 103, 105, 108, 109: self.finishAndSave(forceDialog: true)
+            case 106: self.cancel()
+            case 110: self.finishAndCopy()
+            case 111: self.undoLastSegment()
+            default: break
+            }
+        } ?? []
+
+        let handleKey: (NSEvent, Bool) -> Bool = { [weak self] ev, fromGlobalMonitor in
             guard let self else { return false }
             let flags = ev.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let cmdOrCtrl = flags.contains(.command) || flags.contains(.control)
             let anyMod = cmdOrCtrl || flags.contains(.option) || flags.contains(.shift)
             switch Int(ev.keyCode) {
             case kVK_Space where !anyMod:
+                if fromGlobalMonitor && registeredIDs.contains(101) { return false }
                 self.toggleAutoScroll()
                 return true
-            case kVK_Return, kVK_ANSI_KeypadEnter:
-                self.finishAndCopy()
+            case kVK_Return:
+                let opt = flags.contains(.option)
+                if fromGlobalMonitor && registeredIDs.contains(opt ? 103 : 102) { return false }
+                self.finishAndSave(forceDialog: opt)
+                return true
+            case kVK_ANSI_KeypadEnter:
+                let opt = flags.contains(.option)
+                if fromGlobalMonitor && registeredIDs.contains(opt ? 105 : 104) { return false }
+                self.finishAndSave(forceDialog: opt)
                 return true
             case kVK_Escape:
+                if fromGlobalMonitor && registeredIDs.contains(106) { return false }
                 self.cancel()
                 return true
             case kVK_ANSI_Z where cmdOrCtrl:
+                if fromGlobalMonitor && flags.contains(.command) && registeredIDs.contains(111) { return false }
                 self.undoLastSegment()
                 return true
             case kVK_ANSI_S where cmdOrCtrl:
-                self.finishAndSave()
+                let forceDlg = flags.contains(.shift) || flags.contains(.option)
+                if fromGlobalMonitor && flags.contains(.command) && registeredIDs.contains(forceDlg ? 108 : 107) { return false }
+                self.finishAndSave(forceDialog: forceDlg)
+                return true
+            case kVK_ANSI_C where cmdOrCtrl:
+                if fromGlobalMonitor && flags.contains(.command) && registeredIDs.contains(110) { return false }
+                self.finishAndCopy()
                 return true
             case kVK_ANSI_T where !cmdOrCtrl:
                 self.finishAndOCR()
@@ -292,11 +352,24 @@ public final class LongshotSessionController: ObservableObject {
 
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { ev in
             Task { @MainActor in
-                _ = handleKey(ev)
+                _ = handleKey(ev, true)
             }
         }
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { ev in
-            handleKey(ev) ? nil : ev
+            handleKey(ev, false) ? nil : ev
+        }
+
+        // 2. Automatically yield auto-scrolling if the user physically touches the trackpad or rolls a mouse wheel
+        globalScrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] ev in
+            let isSynthetic = (ev.cgEvent?.getIntegerValueField(.eventSourceUserData) == AccessibilityService.syntheticScrollEventTag)
+            guard !isSynthetic else { return }
+            let userTouchedTrackpad = (ev.phase == .began)
+            let userRolledDiscreteWheel = (ev.phase == [] && ev.momentumPhase == [] && abs(ev.scrollingDeltaY) > 0.5)
+            guard userTouchedTrackpad || userRolledDiscreteWheel else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.isAutoScrolling else { return }
+                self.pauseAutoScrolling(customHint: "手动滚动拼接中 · Space 继续翻页 · Enter 保存")
+            }
         }
     }
 
@@ -334,7 +407,8 @@ public final class LongshotSessionController: ObservableObject {
                         self.pendingInitialWarp = false
                         AccessibilityService.moveCursorIntoViewportIfNeeded(
                             screen: targetScreen,
-                            viewportTopDown: targetRect
+                            viewportTopDown: targetRect,
+                            avoidAppKitRect: self.controlWindow?.frame
                         )
                         try? await Task.sleep(nanoseconds: 55_000_000)
                         guard !Task.isCancelled, self.isAutoScrolling else { continue }
@@ -409,21 +483,25 @@ public final class LongshotSessionController: ObservableObject {
             if goodStepStreak >= 2 {
                 adaptiveScale = 1.0
             }
-            statusHint = "自动翻页中（已拼 \(segmentCount) 段）· Space 暂停"
+            statusHint = "自动翻页中（已拼 \(segmentCount) 段）· Space 暂停 · Enter 保存"
 
         case .still:
             consecutiveStillCount += 1
             if segmentCount == 0 && consecutiveStillCount == 1 {
-                AccessibilityService.moveCursorIntoViewportIfNeeded(screen: screen, viewportTopDown: viewport)
+                AccessibilityService.moveCursorIntoViewportIfNeeded(
+                    screen: screen,
+                    viewportTopDown: viewport,
+                    avoidAppKitRect: controlWindow?.frame
+                )
             }
             let stopThreshold = segmentCount > 0 ? 2 : 4
             if consecutiveStillCount >= stopThreshold {
                 isAutoScrolling = false
                 if segmentCount > 0 {
                     reachedBottom = true
-                    statusHint = "已自动到底（共 \(segmentCount) 段）· Enter 完成"
+                    statusHint = "已自动到底（共 \(segmentCount) 段）· Enter 保存"
                 } else {
-                    statusHint = "页面已到底或不可滚动 · Enter 完成"
+                    statusHint = "页面已到底或不可滚动 · Enter 保存"
                 }
             }
 
@@ -434,7 +512,7 @@ public final class LongshotSessionController: ObservableObject {
 
         case .limitReached:
             isAutoScrolling = false
-            statusHint = "已达高度上限 · Enter 完成"
+            statusHint = "已达高度上限 · Enter 保存"
         }
     }
 
@@ -449,7 +527,7 @@ public final class LongshotSessionController: ObservableObject {
             canUndo = canvas.canUndo
             reachedBottom = false
             if !fromAutoScroll {
-                statusHint = "已拼接 \(segmentCount) 段 · Enter 完成"
+                statusHint = "已拼接 \(segmentCount) 段 · Enter 保存"
             }
             if canvas.headerHeight > 0 || canvas.footerHeight > 0 {
                 headerFooterHint = "已去页眉页脚"
@@ -463,7 +541,7 @@ public final class LongshotSessionController: ObservableObject {
             }
         case .limitReached:
             if !fromAutoScroll {
-                statusHint = "已达高度上限 · Enter 完成"
+                statusHint = "已达高度上限 · Enter 保存"
             }
         }
         return step
@@ -482,47 +560,90 @@ public final class LongshotSessionController: ObservableObject {
         statusHint = "已撤销上一段 · Space 继续翻页"
     }
 
-    public func finishAndCopy() {
-        guard let cg = canvas?.exportBuffer()?.makeCGImage() else {
-            cancel()
-            return
-        }
-        let scale = backingScale
-        stopAndCleanup()
-        onFinishCopy?(cg, scale)
+    private func currentOwnWindowIDs() -> Set<Int> {
+        var ids = Set<Int>()
+        if let id = borderWindow?.windowNumber, id > 0 { ids.insert(id) }
+        if let id = previewWindow?.windowNumber, id > 0 { ids.insert(id) }
+        if let id = controlWindow?.windowNumber, id > 0 { ids.insert(id) }
+        return ids
     }
 
-    public func finishAndSave() {
-        guard let cg = canvas?.exportBuffer()?.makeCGImage() else {
-            cancel()
+    private func exportCurrentCanvasCGImage() -> CGImage? {
+        if let cg = canvas?.exportBuffer()?.makeCGImage() {
+            return cg
+        }
+        return initialFallbackCrop.makeCGImage()
+    }
+
+    private func finalizeSessionAndExport(completion: @escaping (CGImage) -> Void) {
+        guard !isFinalizing else { return }
+        isFinalizing = true
+        let hadLiveWindows = (borderWindow != nil || controlWindow != nil)
+        let ownIDs = currentOwnWindowIDs()
+        let targetScreen = screen
+        let targetRect = viewportTopDown
+
+        // Hide UI & unregister transient Carbon hotkeys in 0ms for instant user feedback
+        stopAndCleanup()
+
+        guard hadLiveWindows else {
+            if let cg = exportCurrentCanvasCGImage() {
+                completion(cg)
+            } else {
+                onCancel?()
+            }
             return
         }
+
+        // Capture one final settled live frame so any content scrolled/loaded right before pressing Enter is included
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let finalFrame = await ScreenCaptureService.captureDisplayRegion(
+                screen: targetScreen,
+                localTopDownRect: targetRect,
+                excludingWindowNumbers: ownIDs
+            ) {
+                _ = self.processFrame(finalFrame, fromAutoScroll: false)
+            }
+            if let cg = self.exportCurrentCanvasCGImage() {
+                completion(cg)
+            } else {
+                self.onCancel?()
+            }
+        }
+    }
+
+    public func finishAndCopy() {
         let scale = backingScale
-        stopAndCleanup()
-        onFinishSave?(cg, scale)
+        finalizeSessionAndExport { [weak self] cg in
+            self?.onFinishCopy?(cg, scale)
+        }
+    }
+
+    public func finishAndSave(forceDialog: Bool = false) {
+        let scale = backingScale
+        finalizeSessionAndExport { [weak self] cg in
+            self?.onFinishSave?(cg, scale, forceDialog)
+        }
     }
 
     public func finishAndAnnotate() {
-        guard let cg = canvas?.exportBuffer()?.makeCGImage() else {
-            cancel()
-            return
-        }
         let scale = backingScale
         let scr = screen
-        stopAndCleanup()
-        onFinishEdit?(cg, scale, scr)
+        finalizeSessionAndExport { [weak self] cg in
+            self?.onFinishEdit?(cg, scale, scr)
+        }
     }
 
     public func finishAndOCR() {
-        guard let cg = canvas?.exportBuffer()?.makeCGImage() else {
-            cancel()
-            return
+        finalizeSessionAndExport { [weak self] cg in
+            self?.onFinishOCR?(cg)
         }
-        stopAndCleanup()
-        onFinishOCR?(cg)
     }
 
     public func cancel() {
+        guard !isFinalizing else { return }
+        isFinalizing = true
         stopAndCleanup()
         onCancel?()
     }
@@ -713,19 +834,21 @@ struct LongshotControlBarView: View {
             .controlSize(.small)
             .help("标注")
 
-            Button("保存") {
-                controller.finishAndSave()
+            Button("复制") {
+                controller.finishAndCopy()
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .help("保存 (⌘S)")
+            .help("仅复制到剪贴板 (⌘C)")
 
-            Button("完成") {
-                controller.finishAndCopy()
+            Button("保存完成") {
+                let forceDialog = NSEvent.modifierFlags.contains(.option)
+                controller.finishAndSave(forceDialog: forceDialog)
             }
             .buttonStyle(.borderedProminent)
+            .tint(.accentColor)
             .controlSize(.small)
-            .help("完成并复制 (Enter)")
+            .help("保存到默认位置并复制（Enter / ⌘S，按住 ⌥ 另存为）")
 
             Button {
                 controller.cancel()

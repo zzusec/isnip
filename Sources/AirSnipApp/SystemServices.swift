@@ -321,7 +321,11 @@ public enum AccessibilityService {
     }
 
     /// Ensures the cursor sits inside the target viewport before emitting synthetic wheel events so WindowServer routes scrolling to the target view.
-    public static func moveCursorIntoViewportIfNeeded(screen: NSScreen, viewportTopDown: ASRect) {
+    public static func moveCursorIntoViewportIfNeeded(
+        screen: NSScreen,
+        viewportTopDown: ASRect,
+        avoidAppKitRect: NSRect? = nil
+    ) {
         let sFrame = screen.frame
         let mouseAppKit = NSEvent.mouseLocation
         let localX = Double(mouseAppKit.x - sFrame.minX)
@@ -335,7 +339,8 @@ public enum AccessibilityService {
             width: max(4.0, viewportTopDown.width - insetX * 2.0),
             height: max(4.0, viewportTopDown.height - insetY * 2.0)
         )
-        if sFrame.contains(mouseAppKit) && inner.contains(ASPoint(localX, localY)) {
+        let overlapsAvoid = avoidAppKitRect?.contains(mouseAppKit) ?? false
+        if !overlapsAvoid && sFrame.contains(mouseAppKit) && inner.contains(ASPoint(localX, localY)) {
             return
         }
 
@@ -347,6 +352,8 @@ public enum AccessibilityService {
         CGWarpMouseCursorPosition(cgPt)
         CGAssociateMouseAndMouseCursorPosition(1)
     }
+
+    public static let syntheticScrollEventTag: Int64 = 0x4953_4E50
 
     /// Posts a continuous pixel-accurate downward scroll tick without trackpad momentum tail.
     public static func postPixelScrollDown(at globalCGPoint: CGPoint, deltaPointsDown: Int) {
@@ -362,6 +369,7 @@ public enum AccessibilityService {
               ) else {
             return
         }
+        ev.setIntegerValueField(.eventSourceUserData, value: syntheticScrollEventTag)
         ev.location = globalCGPoint
         ev.post(tap: .cghidEventTap)
     }
@@ -560,18 +568,21 @@ public enum OutputService {
     ) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         if format == .png && smartCompress {
-            // Phase 1 (~200ms): immediate perceptual quantization write so file is ready & compact right away
-            let stage1 = try ImageEncoder.encodePNGWithReport(
-                cgImage,
-                smartCompression: true,
-                quality: quality,
-                mode: .fastQuantizeOnly
-            )
-            try stage1.data.write(to: url, options: .atomic)
+            // Phase 0 (~16-80ms): write valid lossless raw PNG synchronously so the file is guaranteed on disk right away
+            let rawPngData = try ImageEncoder.encode(cgImage, format: .png)
+            try rawPngData.write(to: url, options: .atomic)
             let savedURL = url
 
-            // Phase 2: atomic background `oxipng -o max` completion (`pngquant --speed 1 | oxipng -o max`)
+            // Phase 1 & 2 in background: atomic `pngquant --speed 1` write followed by atomic `oxipng -o max` write
             Task.detached(priority: .userInitiated) {
+                let stage1 = PngSmartCompressor.compress(
+                    rawPngData,
+                    quality: quality,
+                    mode: .fastQuantizeOnly
+                )
+                if stage1.compressedBytes < rawPngData.count {
+                    try? stage1.data.write(to: savedURL, options: .atomic)
+                }
                 let finalRes = PngSmartCompressor.optimizeWithOxipng(
                     stage1.data,
                     originalBytes: stage1.originalBytes,
@@ -602,7 +613,9 @@ public enum OutputService {
         if !forceDialog && !config.askBeforeSave {
             let dir = defaultSaveDirectoryURL(for: config)
             let baseName = config.nameStyle.formatBaseName()
-            let fmt = config.lastSaveFormat
+            let fmt: ExportImageFormat = (config.lastSaveFormat == .webp && (cgImage.width > 16384 || cgImage.height > 16384))
+                ? .png
+                : config.lastSaveFormat
             let dest = uniqueSaveDestinationURL(directory: dir, baseName: baseName, ext: fmt.fileExtension)
             do {
                 try writeEncodedImage(
@@ -816,13 +829,19 @@ public final class GlobalHotkeyManager {
         case windowCapture = 6
     }
 
+    private static let globalSignature = OSType(0x4153_4E50)    // 'ASNP'
+    private static let transientSignature = OSType(0x4C53_4854) // 'LSHT'
+
     private var eventHandlerRef: EventHandlerRef?
     private var hotKeyRefs: [EventHotKeyRef] = []
+    private var transientHotKeyRefs: [EventHotKeyRef] = []
+    private var transientHandler: ((UInt32) -> Void)?
     private var mouseMonitor: Any?
     private var boundMouseActions: [MouseExtraButton: Action] = [:]
     public var onTrigger: ((Action) -> Void)?
 
     nonisolated(unsafe) private static weak var sharedInstance: GlobalHotkeyManager?
+    public static var shared: GlobalHotkeyManager? { sharedInstance }
 
     public init() {
         Self.sharedInstance = self
@@ -846,14 +865,60 @@ public final class GlobalHotkeyManager {
                 nil,
                 &hkID
             )
-            if status == noErr, let action = Action(rawValue: hkID.id) {
-                Task { @MainActor in
-                    GlobalHotkeyManager.sharedInstance?.onTrigger?(action)
+            if status == noErr {
+                if hkID.signature == GlobalHotkeyManager.transientSignature {
+                    let id = hkID.id
+                    Task { @MainActor in
+                        GlobalHotkeyManager.sharedInstance?.transientHandler?(id)
+                    }
+                } else if hkID.signature == GlobalHotkeyManager.globalSignature,
+                          let action = Action(rawValue: hkID.id) {
+                    Task { @MainActor in
+                        GlobalHotkeyManager.sharedInstance?.onTrigger?(action)
+                    }
                 }
             }
             return noErr
         }
         InstallEventHandler(GetApplicationEventTarget(), callback, 1, &eventType, nil, &eventHandlerRef)
+    }
+
+    /// Registers temporary session-scoped Carbon hotkeys (e.g., `Enter`, `Space`, `Esc`, `⌘S` during Longshot)
+    /// that reliably intercept and consume keystrokes even when a browser or other app owns focus.
+    /// Returns the set of `id`s that were successfully registered via Carbon.
+    @discardableResult
+    public func registerTransientHotKeys(
+        _ specs: [(id: UInt32, keyCode: Int, modifiers: UInt32)],
+        onPress: @escaping (UInt32) -> Void
+    ) -> Set<UInt32> {
+        unregisterTransientHotKeys()
+        transientHandler = onPress
+        var registered = Set<UInt32>()
+        for spec in specs {
+            let hkID = EventHotKeyID(signature: Self.transientSignature, id: spec.id)
+            var ref: EventHotKeyRef?
+            let st = RegisterEventHotKey(
+                UInt32(spec.keyCode),
+                spec.modifiers,
+                hkID,
+                GetApplicationEventTarget(),
+                0,
+                &ref
+            )
+            if st == noErr, let ref {
+                transientHotKeyRefs.append(ref)
+                registered.insert(spec.id)
+            }
+        }
+        return registered
+    }
+
+    public func unregisterTransientHotKeys() {
+        for ref in transientHotKeyRefs {
+            UnregisterEventHotKey(ref)
+        }
+        transientHotKeyRefs.removeAll()
+        transientHandler = nil
     }
 
     @discardableResult

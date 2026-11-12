@@ -666,4 +666,73 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertGreaterThan(shadowSample.a, 0)
         XCTAssertLessThan(shadowSample.a, 255)
     }
+
+    func testLongshotInfiniteScrollDynamicContentRefreshAndTransientFailureRecovery() throws {
+        let width = 180
+        let frameH = 120
+        let totalDocH = 360
+
+        // Build a richly textured synthetic document (`y = 0..<360`)
+        var doc = [UInt8](repeating: 255, count: width * totalDocH * 4)
+        for y in 0..<totalDocH {
+            for x in 0..<width {
+                let o = (y * width + x) * 4
+                let band = (y / 7)
+                doc[o] = UInt8((band * 37 + x * 3) & 0xFF)
+                doc[o + 1] = UInt8((band * 73 + y * 5) & 0xFF)
+                doc[o + 2] = UInt8((band * 19 + (x ^ y)) & 0xFF)
+                doc[o + 3] = 255
+            }
+        }
+
+        func sliceFrame(scrollY: Int, skeletonBottomRows: Int = 0) -> PixelBufferRGBA {
+            var rgba = Array(doc[(scrollY * width * 4)..<((scrollY + frameH) * width * 4)])
+            if skeletonBottomRows > 0 {
+                // Simulate an infinite-scroll "Loading..." placeholder at the bottom of the viewport before new items appear
+                let startY = max(0, frameH - skeletonBottomRows)
+                for y in startY..<frameH {
+                    for x in 0..<width {
+                        let o = (y * width + x) * 4
+                        rgba[o] = 230
+                        rgba[o + 1] = 232
+                        rgba[o + 2] = 236
+                        rgba[o + 3] = 255
+                    }
+                }
+            }
+            return PixelBufferRGBA(width: width, height: frameH, rgba: rgba)
+        }
+
+        let canvas = LongshotCanvas(
+            width: width,
+            frameHeight: frameH,
+            params: LongshotParams(minRatio: 0.84, minFixedRows: 8),
+            maxHeight: 30000
+        )
+
+        // 1. Seed initial viewport (`scrollY = 0`), then scroll to `scrollY = 30` where bottom 34 rows still show a loading skeleton!
+        canvas.seed(sliceFrame(scrollY: 0))
+        let r1 = canvas.push(sliceFrame(scrollY: 30, skeletonBottomRows: 34))
+        XCTAssertEqual(r1, .appended(offset: 30, rows: 30))
+        XCTAssertEqual(canvas.totalHeight, 150)
+
+        // 2. Transient mid-reflow frame (garbage noise) MUST NOT clobber `prevFrame`!
+        let transientNoise = PixelBufferRGBA(width: width, height: frameH, rgba: [UInt8](repeating: 128, count: width * frameH * 4))
+        XCTAssertEqual(canvas.push(transientNoise), .failed)
+
+        // 3. Next frame settles at `scrollY = 66` WITH the newly loaded real content replacing the 34-row skeleton!
+        //    Upper anchored band locks exact `offset = 36`, refreshes the skeleton rows in-place, and appends the new 36 rows!
+        let r2 = canvas.push(sliceFrame(scrollY: 66, skeletonBottomRows: 0))
+        XCTAssertEqual(r2, .appended(offset: 36, rows: 36))
+        XCTAssertEqual(canvas.totalHeight, 186)
+
+        let exported = try XCTUnwrap(canvas.exportBuffer())
+        XCTAssertEqual(exported.height, 186)
+        // Verify that row 130 (which used to be grey `230,232,236` skeleton at `scrollY=30`) was refreshed to true document pixels!
+        let refreshedPx = exported.pixel(x: 90, y: 130)
+        let expectedDocOffset = (130 * width + 90) * 4
+        XCTAssertEqual(refreshedPx.r, doc[expectedDocOffset])
+        XCTAssertEqual(refreshedPx.g, doc[expectedDocOffset + 1])
+        XCTAssertEqual(refreshedPx.b, doc[expectedDocOffset + 2])
+    }
 }

@@ -323,6 +323,55 @@ public enum SmokeTestRunner {
 
                 coordinator.cancelSession()
 
+                // Verify Longshot first-mouse click acceptance, immediate smart-PNG disk write, and full-res tall Longshot annotation export
+                let firstMouseOK = FirstMouseHostingView(rootView: EmptyView()).acceptsFirstMouse(for: nil)
+                var smartSaveImmediateCfg = defaultCfg
+                smartSaveImmediateCfg.smartPngCompression = true
+                var smartSaveImmediateOK = false
+                if let immURL = OutputService.saveImage(for: baked, config: &smartSaveImmediateCfg, configSaveURL: cfgURL),
+                   let immData = try? Data(contentsOf: immURL),
+                   immData.count > 64 {
+                    smartSaveImmediateOK = true
+                }
+
+                var longshotSaveAndEditOK = false
+                let tallW = 800
+                let tallH = 2800
+                let tallBytes = [UInt8](repeating: 248, count: tallW * tallH * 4)
+                let tallBuf = PixelBufferRGBA(width: tallW, height: tallH, rgba: tallBytes)
+                if let tallCG = tallBuf.makeCGImage() {
+                    var lsSavedDims: (Int, Int)?
+                    let lsSession = LongshotSessionController(
+                        screen: screen,
+                        viewportTopDown: ASRect(x: 40, y: 40, width: 400, height: 300),
+                        initialCrop: tallBuf,
+                        config: defaultCfg,
+                        autoStartScroll: false
+                    )
+                    lsSession.onFinishSave = { cg, _, _ in
+                        lsSavedDims = (cg.width, cg.height)
+                    }
+                    lsSession.finishAndSave()
+
+                    let tallEditCoord = CaptureSessionCoordinator(
+                        config: defaultCfg,
+                        mode: .standaloneImageEdit(tallCG, max(1.0, Double(screen.backingScaleFactor)), screen)
+                    )
+                    tallEditCoord.persistConfigChanges = false
+                    tallEditCoord.startStandaloneImageEdit(
+                        cgImage: tallCG,
+                        backingScale: max(1.0, Double(screen.backingScaleFactor)),
+                        screen: screen
+                    )
+                    if let tallBaked = tallEditCoord.renderStandaloneAnnotatedOutputSample() {
+                        longshotSaveAndEditOK = (lsSavedDims?.0 == tallW)
+                            && (lsSavedDims?.1 == tallH)
+                            && (tallBaked.width == tallW)
+                            && (tallBaked.height == tallH)
+                    }
+                    tallEditCoord.cancelSession()
+                }
+
                 // Optional Settings window snapshot dump when AIRSNIP_SMOKE_PREVIEW_DIR is active
                 if let dirPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_PREVIEW_DIR"] {
                     let dirURL = URL(fileURLWithPath: dirPath)
@@ -383,7 +432,7 @@ public enum SmokeTestRunner {
                     offWin.orderOut(nil)
                 }
 
-                return visibleAndPersistent && toolbarExactMatch && isolatedWindowOK && !coordinator.hasVisibleWindows && ended
+                return visibleAndPersistent && toolbarExactMatch && isolatedWindowOK && firstMouseOK && smartSaveImmediateOK && longshotSaveAndEditOK && !coordinator.hasVisibleWindows && ended
             }
             guard overlayOK else {
                 fputs("FAIL: Overlay panel hidesOnDeactivate / accessory visibility check failed\n", stderr)

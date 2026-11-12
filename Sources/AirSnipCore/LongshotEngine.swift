@@ -18,12 +18,15 @@ public struct LongshotMatch: Equatable, Sendable {
     public var startRow: Int
     public var endRow: Int
     public var confident: Bool
+    /// Number of trailing overlap rows to refresh in-place when dynamic/lazy-loaded bottom content finished rendering
+    public var overlapRefreshRows: Int
 
-    public init(offset: Int, startRow: Int, endRow: Int, confident: Bool) {
+    public init(offset: Int, startRow: Int, endRow: Int, confident: Bool, overlapRefreshRows: Int = 0) {
         self.offset = offset
         self.startRow = startRow
         self.endRow = endRow
         self.confident = confident
+        self.overlapRefreshRows = overlapRefreshRows
     }
 }
 
@@ -199,7 +202,7 @@ public enum LongshotStitcher {
         if contentH < 8 || ph.count < height || nh.count < height {
             return LongshotMatch(offset: 0, startRow: height, endRow: height, confident: false)
         }
-        let maxShift = max(1, (contentH * 2) / 3)
+        let maxShift = max(1, (contentH * 82) / 100)
 
         var sameTotal = 0
         var featureCount = 0
@@ -243,6 +246,51 @@ public enum LongshotStitcher {
 
         switch (down, up) {
         case (nil, nil):
+            // Dynamic / infinite-scroll fallback: when scrolling down causes lazy images or "Loading..." skeletons
+            // near the bottom of `prev` to turn into real newly-loaded content in `next`, lock onto the upper anchored band!
+            if let anchored = bestAnchoredUpperBandShift(
+                ph: ph,
+                nh: nh,
+                ct: ct,
+                ch: contentH,
+                maxShift: maxShift,
+                minRatio: params.minRatio
+            ) {
+                return LongshotMatch(
+                    offset: anchored.shift,
+                    startRow: ct + contentH - anchored.shift,
+                    endRow: ct + contentH,
+                    confident: true,
+                    overlapRefreshRows: anchored.refreshRows
+                )
+            }
+            // Also check stationary frame where bottom lazy-loaded content just expanded without scroll (`offset == 0` with upper 60% identical)
+            if contentH >= 80 {
+                let anchorZeroLen = (contentH * 60) / 100
+                var zeroAnchorSame = 0
+                var zeroAnchorFeat = 0
+                var zeroAnchorFeatSame = 0
+                for i in 0..<anchorZeroLen {
+                    let idx = ct + i
+                    let eq = (ph[idx] == nh[idx])
+                    if eq { zeroAnchorSame += 1 }
+                    if i > 0 && (ph[idx] != ph[idx - 1] || nh[idx] != nh[idx - 1]) {
+                        zeroAnchorFeat += 1
+                        if eq { zeroAnchorFeatSame += 1 }
+                    }
+                }
+                if Double(zeroAnchorSame) / Double(anchorZeroLen) >= 0.94
+                    && zeroAnchorFeat >= 4
+                    && Double(zeroAnchorFeatSame) / Double(zeroAnchorFeat) >= 0.90 {
+                    return LongshotMatch(
+                        offset: 0,
+                        startRow: ct + contentH,
+                        endRow: ct + contentH,
+                        confident: true,
+                        overlapRefreshRows: contentH - anchorZeroLen
+                    )
+                }
+            }
             return LongshotMatch(offset: 0, startRow: height, endRow: height, confident: false)
         case (let d?, nil):
             return LongshotMatch(offset: d.shift, startRow: ct + contentH - d.shift, endRow: ct + contentH, confident: true)
@@ -255,6 +303,56 @@ public enum LongshotStitcher {
                 return LongshotMatch(offset: -u.shift, startRow: ct, endRow: ct + u.shift, confident: true)
             }
         }
+    }
+
+    private static func bestAnchoredUpperBandShift(
+        ph: [UInt64],
+        nh: [UInt64],
+        ct: Int,
+        ch: Int,
+        maxShift: Int,
+        minRatio: Double
+    ) -> (shift: Int, refreshRows: Int, score: Double)? {
+        guard ch >= 80 else { return nil }
+        let strictTotal = max(0.90, min(0.96, minRatio + 0.04))
+        let strictFeat = max(0.85, min(0.94, minRatio))
+        var best: (shift: Int, refreshRows: Int, score: Double)?
+
+        for s in 1...maxShift {
+            let overlap = ch - s
+            if overlap < 56 { continue }
+            let anchorLen = max(40, (overlap * 55) / 100)
+            if anchorLen >= overlap { continue }
+
+            var matches = 0
+            var featTotal = 0
+            var featMatches = 0
+            for i in 0..<anchorLen {
+                let pIdx = ct + i + s
+                let nIdx = ct + i
+                let equal = (ph[pIdx] == nh[nIdx])
+                if equal { matches += 1 }
+                if i > 0 && (ph[pIdx] != ph[pIdx - 1] || nh[nIdx] != nh[nIdx - 1]) {
+                    featTotal += 1
+                    if equal { featMatches += 1 }
+                }
+            }
+            guard featTotal >= 4 else { continue }
+            let totalRatio = Double(matches) / Double(anchorLen)
+            let featRatio = Double(featMatches) / Double(featTotal)
+            if totalRatio < strictTotal || featRatio < strictFeat { continue }
+
+            let score = featRatio * 0.72 + totalRatio * 0.28
+            let refreshRows = overlap - anchorLen
+            if let current = best {
+                if score > current.score + 0.008 {
+                    best = (s, refreshRows, score)
+                }
+            } else {
+                best = (s, refreshRows, score)
+            }
+        }
+        return best
     }
 
     private static func bestConsistentShift(
@@ -338,6 +436,7 @@ public final class LongshotCanvas {
     private var bottomRowCount: Int = 0
 
     private var segments: [(prepended: Bool, rows: Int)] = []
+    private var consecutiveFailedFrames: Int = 0
 
     public init(width: Int, frameHeight: Int, params: LongshotParams = LongshotParams(), maxHeight: Int = 30000) {
         self.width = width
@@ -423,9 +522,41 @@ public final class LongshotCanvas {
             params: params
         )
         if !match.confident {
-            prevFrame = rgba
+            consecutiveFailedFrames += 1
+            // Keep `prevFrame` intact across 1-2 transient mid-render / fast-scroll frames so settled content matches without losing rows.
+            // If 3+ consecutive frames have zero overlap (e.g. PageDown / full-screen scrollbar jump), re-anchor and append visible body.
+            if consecutiveFailedFrames >= 3 {
+                consecutiveFailedFrames = 0
+                let bodyRows = max(0, frameHeight - headerHeight - footerHeight)
+                if bodyRows > 0 && headerHeight + contentHeight + footerHeight + bodyRows <= maxHeight {
+                    let bodySlice = rgba[(headerHeight * stride)..<((frameHeight - footerHeight) * stride)]
+                    bottomRowsData.append(contentsOf: bodySlice)
+                    bottomRowCount += bodyRows
+                    segments.append((prepended: false, rows: bodyRows))
+                    prevFrame = rgba
+                    return .appended(offset: bodyRows, rows: bodyRows)
+                }
+                prevFrame = rgba
+            }
             return .failed
         }
+        consecutiveFailedFrames = 0
+
+        if match.overlapRefreshRows > 0 && match.offset >= 0 {
+            let refreshRows = min(match.overlapRefreshRows, bottomRowCount)
+            let refreshSrcEnd = match.startRow
+            let refreshSrcStart = refreshSrcEnd - refreshRows
+            if refreshRows > 0 && refreshSrcStart >= headerHeight && refreshSrcEnd <= frameHeight - footerHeight {
+                let byteLen = refreshRows * stride
+                if bottomRowsData.count >= byteLen {
+                    bottomRowsData.replaceSubrange(
+                        (bottomRowsData.count - byteLen)..<bottomRowsData.count,
+                        with: rgba[(refreshSrcStart * stride)..<(refreshSrcEnd * stride)]
+                    )
+                }
+            }
+        }
+
         if match.offset == 0 {
             prevFrame = rgba
             return .still
