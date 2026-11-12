@@ -297,11 +297,308 @@ public enum ImageEncodingError: LocalizedError {
     }
 }
 
+public struct PngCompressionResult: Sendable, Equatable {
+    public let data: Data
+    public let originalBytes: Int
+    public let compressedBytes: Int
+    public let usedPngquant: Bool
+    public let usedOxipng: Bool
+
+    public init(
+        data: Data,
+        originalBytes: Int,
+        compressedBytes: Int,
+        usedPngquant: Bool,
+        usedOxipng: Bool
+    ) {
+        self.data = data
+        self.originalBytes = originalBytes
+        self.compressedBytes = compressedBytes
+        self.usedPngquant = usedPngquant
+        self.usedOxipng = usedOxipng
+    }
+
+    public var savedRatioPercent: Int {
+        guard originalBytes > 0, compressedBytes < originalBytes else { return 0 }
+        let pct = (Double(originalBytes - compressedBytes) / Double(originalBytes)) * 100.0
+        return max(0, min(99, Int(pct.rounded())))
+    }
+
+    public var formattedSummary: String {
+        let compStr = PngSmartCompressor.formatByteCount(compressedBytes)
+        if savedRatioPercent >= 3 {
+            let origStr = PngSmartCompressor.formatByteCount(originalBytes)
+            return "\(origStr) → \(compStr) (-\(savedRatioPercent)%)"
+        }
+        return compStr
+    }
+
+    public var compactBadgeSummary: String {
+        let compStr = PngSmartCompressor.formatByteCount(compressedBytes)
+        if savedRatioPercent >= 3 {
+            return "\(compStr) (-\(savedRatioPercent)%)"
+        }
+        return compStr
+    }
+}
+
+/// Smart PNG compression pipeline matching:
+/// `pngquant --speed 1 - <"$f" | oxipng -o max --out "[压缩后]$f" -`
+public enum PngSmartCompressor {
+    public enum Mode: Sendable, Equatable {
+        case fastQuantizeOnly
+        case fullPipeline(oxipngMax: Bool)
+    }
+
+    private static let pngMagic: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+
+    public static func formatByteCount(_ bytes: Int) -> String {
+        if bytes >= 1_000_000 {
+            return String(format: "%.1f MB", Double(bytes) / 1_048_576.0)
+        } else if bytes >= 1024 {
+            return String(format: "%d KB", max(1, Int((Double(bytes) / 1024.0).rounded())))
+        } else {
+            return "\(bytes) B"
+        }
+    }
+
+    public static func resolveHelperBinary(named name: String) -> URL? {
+        let fm = FileManager.default
+        var candidates: [URL] = []
+
+        if let envDir = ProcessInfo.processInfo.environment["ISNIP_HELPERS_DIR"] ?? ProcessInfo.processInfo.environment["AIRSNIP_HELPERS_DIR"], !envDir.isEmpty {
+            candidates.append(URL(fileURLWithPath: envDir, isDirectory: true).appendingPathComponent(name))
+        }
+
+        let bundleHelpers = Bundle.main.bundleURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Helpers", isDirectory: true)
+            .appendingPathComponent(name)
+        candidates.append(bundleHelpers)
+
+        // Source-tree fallback (used during `swift test` and local CLI development):
+        // #filePath = .../macos/Sources/AirSnipCore/ImageCodecs.swift -> .../macos/Vendor/Helpers/<name>
+        let sourceRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        candidates.append(
+            sourceRoot
+                .appendingPathComponent("Vendor", isDirectory: true)
+                .appendingPathComponent("Helpers", isDirectory: true)
+                .appendingPathComponent(name)
+        )
+
+        candidates.append(URL(fileURLWithPath: "/opt/homebrew/bin/\(name)"))
+        candidates.append(URL(fileURLWithPath: "/usr/local/bin/\(name)"))
+
+        for url in candidates {
+            if fm.isExecutableFile(atPath: url.path) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    public static var hasBundledOrSystemTools: Bool {
+        resolveHelperBinary(named: "pngquant") != nil || resolveHelperBinary(named: "oxipng") != nil
+    }
+
+    private static func isValidPNG(_ data: Data) -> Bool {
+        guard data.count > pngMagic.count else { return false }
+        return Array(data.prefix(pngMagic.count)) == pngMagic
+    }
+
+    @discardableResult
+    private static func runTool(_ executable: URL, arguments: [String]) -> Int32 {
+        let proc = Process()
+        proc.executableURL = executable
+        proc.arguments = arguments
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            return proc.terminationStatus
+        } catch {
+            return -1
+        }
+    }
+
+    public static func compress(
+        _ rawPngData: Data,
+        quality: PngCompressionQualityPreset = .visuallyLossless,
+        mode: Mode = .fullPipeline(oxipngMax: true)
+    ) -> PngCompressionResult {
+        guard isValidPNG(rawPngData) else {
+            return PngCompressionResult(
+                data: rawPngData,
+                originalBytes: rawPngData.count,
+                compressedBytes: rawPngData.count,
+                usedPngquant: false,
+                usedOxipng: false
+            )
+        }
+
+        let fm = FileManager.default
+        let workDir = fm.temporaryDirectory.appendingPathComponent("isnip-png-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
+        } catch {
+            return PngCompressionResult(
+                data: rawPngData,
+                originalBytes: rawPngData.count,
+                compressedBytes: rawPngData.count,
+                usedPngquant: false,
+                usedOxipng: false
+            )
+        }
+        defer {
+            try? fm.removeItem(at: workDir)
+        }
+
+        let inputURL = workDir.appendingPathComponent("input.png")
+        let quantURL = workDir.appendingPathComponent("quant.png")
+        let oxiURL = workDir.appendingPathComponent("oxi.png")
+
+        do {
+            try rawPngData.write(to: inputURL, options: .atomic)
+        } catch {
+            return PngCompressionResult(
+                data: rawPngData,
+                originalBytes: rawPngData.count,
+                compressedBytes: rawPngData.count,
+                usedPngquant: false,
+                usedOxipng: false
+            )
+        }
+
+        var bestData = rawPngData
+        var bestFileURL = inputURL
+        var didPngquant = false
+        var didOxipng = false
+
+        if let pngquantURL = resolveHelperBinary(named: "pngquant") {
+            var args = ["--speed", "1"]
+            if let q = quality.qualityArgument {
+                args += ["--quality", q]
+            }
+            args += ["--force", "--output", quantURL.path, "--", inputURL.path]
+            let rc = runTool(pngquantURL, arguments: args)
+            if rc == 0,
+               let qData = try? Data(contentsOf: quantURL),
+               isValidPNG(qData),
+               qData.count < bestData.count {
+                bestData = qData
+                bestFileURL = quantURL
+                didPngquant = true
+            }
+        }
+
+        if case .fullPipeline(let oxipngMax) = mode,
+           let oxipngURL = resolveHelperBinary(named: "oxipng") {
+            let optLevel = oxipngMax ? "max" : "4"
+            let args = ["-o", optLevel, "--strip", "safe", "--out", oxiURL.path, bestFileURL.path]
+            let rc = runTool(oxipngURL, arguments: args)
+            if rc == 0,
+               let oData = try? Data(contentsOf: oxiURL),
+               isValidPNG(oData),
+               oData.count <= bestData.count {
+                bestData = oData
+                didOxipng = true
+            }
+        }
+
+        return PngCompressionResult(
+            data: bestData,
+            originalBytes: rawPngData.count,
+            compressedBytes: bestData.count,
+            usedPngquant: didPngquant,
+            usedOxipng: didOxipng
+        )
+    }
+
+    /// Runs lossless `oxipng -o max --strip safe` on an already-quantized (or raw) PNG buffer.
+    public static func optimizeWithOxipng(
+        _ currentPngData: Data,
+        originalBytes: Int,
+        usedPngquant: Bool,
+        oxipngMax: Bool = true
+    ) -> PngCompressionResult {
+        guard isValidPNG(currentPngData),
+              let oxipngURL = resolveHelperBinary(named: "oxipng") else {
+            return PngCompressionResult(
+                data: currentPngData,
+                originalBytes: originalBytes,
+                compressedBytes: currentPngData.count,
+                usedPngquant: usedPngquant,
+                usedOxipng: false
+            )
+        }
+        let fm = FileManager.default
+        let workDir = fm.temporaryDirectory.appendingPathComponent("isnip-oxi-\(UUID().uuidString)", isDirectory: true)
+        guard (try? fm.createDirectory(at: workDir, withIntermediateDirectories: true)) != nil else {
+            return PngCompressionResult(
+                data: currentPngData,
+                originalBytes: originalBytes,
+                compressedBytes: currentPngData.count,
+                usedPngquant: usedPngquant,
+                usedOxipng: false
+            )
+        }
+        defer { try? fm.removeItem(at: workDir) }
+
+        let inURL = workDir.appendingPathComponent("in.png")
+        let outURL = workDir.appendingPathComponent("out.png")
+        guard (try? currentPngData.write(to: inURL, options: .atomic)) != nil else {
+            return PngCompressionResult(
+                data: currentPngData,
+                originalBytes: originalBytes,
+                compressedBytes: currentPngData.count,
+                usedPngquant: usedPngquant,
+                usedOxipng: false
+            )
+        }
+        let optLevel = oxipngMax ? "max" : "4"
+        let rc = runTool(oxipngURL, arguments: ["-o", optLevel, "--strip", "safe", "--out", outURL.path, inURL.path])
+        if rc == 0,
+           let outData = try? Data(contentsOf: outURL),
+           isValidPNG(outData),
+           outData.count <= currentPngData.count {
+            return PngCompressionResult(
+                data: outData,
+                originalBytes: originalBytes,
+                compressedBytes: outData.count,
+                usedPngquant: usedPngquant,
+                usedOxipng: true
+            )
+        }
+        return PngCompressionResult(
+            data: currentPngData,
+            originalBytes: originalBytes,
+            compressedBytes: currentPngData.count,
+            usedPngquant: usedPngquant,
+            usedOxipng: false
+        )
+    }
+}
+
 public enum ImageEncoder {
-    public static func encode(_ image: CGImage, format: ExportImageFormat, jpegQuality: Double = 0.92) throws -> Data {
+    public static func encode(
+        _ image: CGImage,
+        format: ExportImageFormat,
+        jpegQuality: Double = 0.92,
+        smartPngCompression: Bool = false,
+        pngQuality: PngCompressionQualityPreset = .visuallyLossless,
+        oxipngMax: Bool = true
+    ) throws -> Data {
         switch format {
         case .png:
-            return try encodeWithImageIO(image, utType: UTType.png.identifier, properties: nil)
+            let raw = try encodeWithImageIO(image, utType: UTType.png.identifier, properties: nil)
+            if smartPngCompression {
+                return PngSmartCompressor.compress(raw, quality: pngQuality, mode: .fullPipeline(oxipngMax: oxipngMax)).data
+            }
+            return raw
         case .jpeg:
             let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: jpegQuality]
             return try encodeWithImageIO(image, utType: UTType.jpeg.identifier, properties: props)
@@ -314,6 +611,25 @@ public enum ImageEncoder {
             }
             return VP8LLosslessEncoder.encode(buf)
         }
+    }
+
+    public static func encodePNGWithReport(
+        _ image: CGImage,
+        smartCompression: Bool,
+        quality: PngCompressionQualityPreset = .visuallyLossless,
+        mode: PngSmartCompressor.Mode = .fullPipeline(oxipngMax: true)
+    ) throws -> PngCompressionResult {
+        let raw = try encodeWithImageIO(image, utType: UTType.png.identifier, properties: nil)
+        guard smartCompression else {
+            return PngCompressionResult(
+                data: raw,
+                originalBytes: raw.count,
+                compressedBytes: raw.count,
+                usedPngquant: false,
+                usedOxipng: false
+            )
+        }
+        return PngSmartCompressor.compress(raw, quality: quality, mode: mode)
     }
 
     private static func encodeWithImageIO(_ image: CGImage, utType: String, properties: [CFString: Any]?) throws -> Data {

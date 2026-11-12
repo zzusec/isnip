@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release policy and bundle metadata regression checks for AirSnip."""
+"""Release policy and bundle metadata regression checks for iSnip."""
 
 import pathlib
 import plistlib
@@ -27,6 +27,8 @@ def main() -> None:
     version = info.get("CFBundleShortVersionString", "")
     build = info.get("CFBundleVersion", "")
     bundle_id = info.get("CFBundleIdentifier", "")
+    bundle_name = info.get("CFBundleName", "")
+    executable = info.get("CFBundleExecutable", "")
     update_repo = info.get("AirSnipUpdateRepository", "")
 
     if not re.fullmatch(r"\d+\.\d+\.\d+", str(version)):
@@ -35,7 +37,9 @@ def main() -> None:
         fail(f"Invalid CFBundleVersion: {build!r}")
     if bundle_id != "io.zzusec.airsnip":
         fail(f"Unexpected CFBundleIdentifier: {bundle_id!r}")
-    if update_repo != "zzusec/airsnip-releases":
+    if bundle_name != "iSnip" or executable != "iSnip":
+        fail(f"Expected iSnip bundle/executable name, got {bundle_name!r} / {executable!r}")
+    if update_repo != "zzusec/isnip-releases":
         fail(f"Unexpected AirSnipUpdateRepository: {update_repo!r}")
 
     if not CHANGELOG_PATH.is_file():
@@ -55,7 +59,7 @@ def main() -> None:
     if "--force" in script_text or "push -f" in script_text:
         fail("publish-release.sh must never force-push")
 
-    print(f"release-policy: ok (v{version}, build {build})")
+    print(f"release-policy: ok (iSnip v{version}, build {build})")
 
 
 if __name__ == "__main__":

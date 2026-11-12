@@ -2,6 +2,7 @@ import AppKit
 import Carbon
 import CoreGraphics
 import ImageIO
+import QuartzCore
 import ScreenCaptureKit
 import ServiceManagement
 import UniformTypeIdentifiers
@@ -79,13 +80,13 @@ public enum ScreenCaptureService {
         alert.alertStyle = .informational
         alert.messageText = "「屏幕录制」权限尚未生效"
         alert.informativeText = """
-        AirSnip 抓屏被系统拦截（所有图像仅在本机内存中处理，绝不联网上传）：
+        iSnip 抓屏被系统拦截（所有图像仅在本机内存中处理，绝不联网上传）：
 
-        1. 若您刚在「系统设置 → 录屏与系统录音」中开启了开关：请点击「重启 AirSnip 以生效」。
-        2. 若系统设置里的 AirSnip 开关原本就是开启状态仍提示此窗口：这是因为旧版本签名记录残留导致系统校验失效，请点击「重置权限记录并重新授权」一键修复。
-        3. 若尚未开启权限：请点击「打开系统设置」开启 AirSnip。
+        1. 若您刚在「系统设置 → 录屏与系统录音」中开启了开关：请点击「重启 iSnip 以生效」。
+        2. 若系统设置里的 iSnip 开关原本就是开启状态仍提示此窗口：这是因为旧版本签名记录残留导致系统校验失效，请点击「重置权限记录并重新授权」一键修复。
+        3. 若尚未开启权限：请点击「打开系统设置」开启 iSnip。
         """
-        alert.addButton(withTitle: "重启 AirSnip 以生效")
+        alert.addButton(withTitle: "重启 iSnip 以生效")
         alert.addButton(withTitle: "重置权限记录并重新授权")
         alert.addButton(withTitle: "打开系统设置")
         alert.addButton(withTitle: "稍后")
@@ -241,25 +242,88 @@ public enum ScreenCaptureService {
 
 @MainActor
 public enum OutputService {
-    public static func copyImageToClipboard(_ cgImage: CGImage, backingScale: Double = 2.0) {
+    public struct SaveOutcome: Sendable {
+        public let url: URL
+        public let initialResult: PngCompressionResult?
+    }
+
+    private static func writePngDataToPasteboard(_ pngData: Data) -> Int {
         let pb = NSPasteboard.general
         pb.clearContents()
+        let item = NSPasteboardItem()
+        // Write PNG data ONLY (omitting uncompressed TIFF avoids 10-20 MB clipboard bloat!)
+        item.setData(pngData, forType: .png)
+        pb.writeObjects([item])
+        return pb.changeCount
+    }
 
+    public static func copyImageToClipboard(
+        _ cgImage: CGImage,
+        backingScale: Double = 2.0,
+        config: AirSnipConfig? = nil,
+        onCompressed: (@MainActor @Sendable (PngCompressionResult) -> Void)? = nil
+    ) {
         let pointSize = NSSize(
             width: CGFloat(Double(cgImage.width) / max(1.0, backingScale)),
             height: CGFloat(Double(cgImage.height) / max(1.0, backingScale))
         )
         let nsImage = NSImage(cgImage: cgImage, size: pointSize)
 
-        if let pngData = try? ImageEncoder.encode(cgImage, format: .png) {
-            let item = NSPasteboardItem()
-            item.setData(pngData, forType: .png)
-            if let tiffData = nsImage.tiffRepresentation {
-                item.setData(tiffData, forType: .tiff)
-            }
-            pb.writeObjects([item])
-        } else {
+        guard let rawPngData = try? ImageEncoder.encode(cgImage, format: .png) else {
+            let pb = NSPasteboard.general
+            pb.clearContents()
             pb.writeObjects([nsImage])
+            return
+        }
+
+        let initialChangeCount = writePngDataToPasteboard(rawPngData)
+        let shouldCompress = (config?.smartPngCompression ?? true) && (config?.compressClipboardPng ?? true)
+        let qualityPreset = config?.pngCompressionQuality ?? .visuallyLossless
+
+        guard shouldCompress else {
+            let passthrough = PngCompressionResult(
+                data: rawPngData,
+                originalBytes: rawPngData.count,
+                compressedBytes: rawPngData.count,
+                usedPngquant: false,
+                usedOxipng: false
+            )
+            onCompressed?(passthrough)
+            return
+        }
+
+        Task.detached(priority: .userInitiated) {
+            // Stage 1 (~200ms): fast perceptual quantization (`pngquant --speed 1`)
+            let stage1 = PngSmartCompressor.compress(
+                rawPngData,
+                quality: qualityPreset,
+                mode: .fastQuantizeOnly
+            )
+            let afterStage1Count: Int? = await MainActor.run {
+                let pb = NSPasteboard.general
+                guard pb.changeCount == initialChangeCount else { return nil }
+                var nextCount = initialChangeCount
+                if stage1.compressedBytes < rawPngData.count {
+                    nextCount = writePngDataToPasteboard(stage1.data)
+                }
+                onCompressed?(stage1)
+                return nextCount
+            }
+            guard let expectedCount = afterStage1Count else { return }
+
+            // Stage 2: lossless `oxipng -o max` bit-stream squeeze in background
+            let stage2 = PngSmartCompressor.optimizeWithOxipng(
+                stage1.data,
+                originalBytes: rawPngData.count,
+                usedPngquant: stage1.usedPngquant,
+                oxipngMax: true
+            )
+            guard stage2.compressedBytes < stage1.compressedBytes else { return }
+            await MainActor.run {
+                let pb = NSPasteboard.general
+                guard pb.changeCount == expectedCount else { return }
+                _ = writePngDataToPasteboard(stage2.data)
+            }
         }
     }
 
@@ -306,22 +370,27 @@ public enum OutputService {
                 return cg
             }
         }
-        ToastHUD.show("无法读取该图片文件")
+        ToastHUD.show("无法读取该图片文件", symbol: "exclamationmark.triangle.fill", tint: .systemOrange)
         return nil
     }
 
     public static func presentSaveDialog(
         for cgImage: CGImage,
         config: inout AirSnipConfig,
-        parentWindow: NSWindow? = nil
+        parentWindow: NSWindow? = nil,
+        onFinalCompressed: (@MainActor @Sendable (URL, PngCompressionResult) -> Void)? = nil
     ) -> URL? {
+        let _ = parentWindow
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSSavePanel()
-        panel.title = "保存截图"
+        panel.title = "保存截图 — iSnip"
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
 
         var chosenFormat = config.lastSaveFormat
+        var chosenSmartCompress = config.smartPngCompression
+        var chosenQuality = config.pngCompressionQuality
+
         let baseName = config.nameStyle.formatBaseName()
         panel.nameFieldStringValue = "\(baseName).\(chosenFormat.fileExtension)"
 
@@ -335,43 +404,125 @@ public enum OutputService {
             panel.directoryURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
         }
 
-        // Format accessory bar (PNG / JPEG / Lossless WebP)
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 38))
-        let label = NSTextField(labelWithString: "图像格式：")
-        label.frame = NSRect(x: 12, y: 9, width: 72, height: 20)
-        let popup = NSPopUpButton(frame: NSRect(x: 84, y: 5, width: 216, height: 28), pullsDown: false)
+        // Refined two-row Save Panel Accessory Bar (Format + PNG Smart Lossless Compression switch & quality preset)
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 452, height: 74))
+
+        let fmtLabel = NSTextField(labelWithString: "图像格式：")
+        fmtLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
+        fmtLabel.alignment = .right
+        fmtLabel.frame = NSRect(x: 12, y: 42, width: 76, height: 20)
+
+        let fmtPopup = NSPopUpButton(frame: NSRect(x: 94, y: 38, width: 176, height: 28), pullsDown: false)
         for fmt in ExportImageFormat.allCases {
-            popup.addItem(withTitle: fmt.displayName)
+            fmtPopup.addItem(withTitle: fmt.displayName)
         }
         if let idx = ExportImageFormat.allCases.firstIndex(of: chosenFormat) {
-            popup.selectItem(at: idx)
+            fmtPopup.selectItem(at: idx)
         }
 
+        let compLabel = NSTextField(labelWithString: "无损压缩：")
+        compLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
+        compLabel.alignment = .right
+        compLabel.frame = NSRect(x: 12, y: 10, width: 76, height: 20)
+
+        let compSwitch = NSSwitch(frame: NSRect(x: 96, y: 8, width: 42, height: 24))
+        compSwitch.state = chosenSmartCompress ? .on : .off
+
+        let compHint = NSTextField(labelWithString: "pngquant + oxipng")
+        compHint.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        compHint.textColor = .secondaryLabelColor
+        compHint.frame = NSRect(x: 144, y: 10, width: 128, height: 18)
+
+        let qualityPopup = NSPopUpButton(frame: NSRect(x: 278, y: 6, width: 160, height: 28), pullsDown: false)
+        for q in PngCompressionQualityPreset.allCases {
+            qualityPopup.addItem(withTitle: q.shortTitle)
+        }
+        if let qIdx = PngCompressionQualityPreset.allCases.firstIndex(of: chosenQuality) {
+            qualityPopup.selectItem(at: qIdx)
+        }
+
+        func syncAccessoryStates() {
+            let isPng = (chosenFormat == .png)
+            compSwitch.isEnabled = isPng
+            compLabel.alphaValue = isPng ? 1.0 : 0.45
+            compHint.alphaValue = (isPng && chosenSmartCompress) ? 1.0 : 0.42
+            qualityPopup.isEnabled = isPng && chosenSmartCompress
+        }
+        syncAccessoryStates()
+
         @MainActor
-        final class FormatChangedTarget: NSObject {
+        final class SaveAccessoryTarget: NSObject {
             let panel: NSSavePanel
+            let compSwitch: NSSwitch
+            let qualityPopup: NSPopUpButton
             var onFormatChange: (ExportImageFormat) -> Void
-            init(panel: NSSavePanel, onFormatChange: @escaping (ExportImageFormat) -> Void) {
+            var onCompressToggle: (Bool) -> Void
+            var onQualityChange: (PngCompressionQualityPreset) -> Void
+
+            init(
+                panel: NSSavePanel,
+                compSwitch: NSSwitch,
+                qualityPopup: NSPopUpButton,
+                onFormatChange: @escaping (ExportImageFormat) -> Void,
+                onCompressToggle: @escaping (Bool) -> Void,
+                onQualityChange: @escaping (PngCompressionQualityPreset) -> Void
+            ) {
                 self.panel = panel
+                self.compSwitch = compSwitch
+                self.qualityPopup = qualityPopup
                 self.onFormatChange = onFormatChange
+                self.onCompressToggle = onCompressToggle
+                self.onQualityChange = onQualityChange
             }
-            @objc func changed(_ sender: NSPopUpButton) {
+
+            @objc func formatChanged(_ sender: NSPopUpButton) {
                 let idx = max(0, min(ExportImageFormat.allCases.count - 1, sender.indexOfSelectedItem))
                 let fmt = ExportImageFormat.allCases[idx]
                 onFormatChange(fmt)
                 let current = (panel.nameFieldStringValue as NSString).deletingPathExtension
-                let stem = current.isEmpty ? "airsnip" : current
+                let stem = current.isEmpty ? "isnip" : current
                 panel.nameFieldStringValue = "\(stem).\(fmt.fileExtension)"
+            }
+
+            @objc func compressToggled(_ sender: NSSwitch) {
+                onCompressToggle(sender.state == .on)
+            }
+
+            @objc func qualityChanged(_ sender: NSPopUpButton) {
+                let idx = max(0, min(PngCompressionQualityPreset.allCases.count - 1, sender.indexOfSelectedItem))
+                onQualityChange(PngCompressionQualityPreset.allCases[idx])
             }
         }
 
-        let helper = FormatChangedTarget(panel: panel) { newFmt in
-            chosenFormat = newFmt
-        }
-        popup.target = helper
-        popup.action = #selector(FormatChangedTarget.changed(_:))
-        accessory.addSubview(label)
-        accessory.addSubview(popup)
+        let helper = SaveAccessoryTarget(
+            panel: panel,
+            compSwitch: compSwitch,
+            qualityPopup: qualityPopup,
+            onFormatChange: { newFmt in
+                chosenFormat = newFmt
+                syncAccessoryStates()
+            },
+            onCompressToggle: { enabled in
+                chosenSmartCompress = enabled
+                syncAccessoryStates()
+            },
+            onQualityChange: { newQ in
+                chosenQuality = newQ
+            }
+        )
+        fmtPopup.target = helper
+        fmtPopup.action = #selector(SaveAccessoryTarget.formatChanged(_:))
+        compSwitch.target = helper
+        compSwitch.action = #selector(SaveAccessoryTarget.compressToggled(_:))
+        qualityPopup.target = helper
+        qualityPopup.action = #selector(SaveAccessoryTarget.qualityChanged(_:))
+
+        accessory.addSubview(fmtLabel)
+        accessory.addSubview(fmtPopup)
+        accessory.addSubview(compLabel)
+        accessory.addSubview(compSwitch)
+        accessory.addSubview(compHint)
+        accessory.addSubview(qualityPopup)
         panel.accessoryView = accessory
 
         let response = panel.runModal()
@@ -384,9 +535,40 @@ public enum OutputService {
         }
 
         do {
-            let encoded = try ImageEncoder.encode(cgImage, format: chosenFormat)
-            try encoded.write(to: url, options: .atomic)
+            if chosenFormat == .png && chosenSmartCompress {
+                // Phase 1 (~200ms): immediate perceptual quantization write so file is ready & compact right away
+                let stage1 = try ImageEncoder.encodePNGWithReport(
+                    cgImage,
+                    smartCompression: true,
+                    quality: chosenQuality,
+                    mode: .fastQuantizeOnly
+                )
+                try stage1.data.write(to: url, options: .atomic)
+                let savedURL = url
+
+                // Phase 2: atomic background `oxipng -o max` completion (`pngquant --speed 1 | oxipng -o max`)
+                Task.detached(priority: .userInitiated) {
+                    let finalRes = PngSmartCompressor.optimizeWithOxipng(
+                        stage1.data,
+                        originalBytes: stage1.originalBytes,
+                        usedPngquant: stage1.usedPngquant,
+                        oxipngMax: true
+                    )
+                    if finalRes.compressedBytes < stage1.compressedBytes {
+                        try? finalRes.data.write(to: savedURL, options: .atomic)
+                    }
+                    await MainActor.run {
+                        onFinalCompressed?(savedURL, finalRes)
+                    }
+                }
+            } else {
+                let encoded = try ImageEncoder.encode(cgImage, format: chosenFormat)
+                try encoded.write(to: url, options: .atomic)
+            }
+
             config.lastSaveFormat = chosenFormat
+            config.smartPngCompression = chosenSmartCompress
+            config.pngCompressionQuality = chosenQuality
             config.lastSaveDirectory = url.deletingLastPathComponent().path
             try? config.save()
             return url
@@ -550,7 +732,7 @@ public enum UpdateChecker {
     }
 
     public static var releaseRepo: String {
-        (Bundle.main.infoDictionary?["AirSnipUpdateRepository"] as? String) ?? "zzusec/airsnip-releases"
+        (Bundle.main.infoDictionary?["AirSnipUpdateRepository"] as? String) ?? "zzusec/isnip-releases"
     }
 
     public static func checkLatest() async -> Result<UpdateReleaseInfo?, Error> {
@@ -612,26 +794,38 @@ public enum ToastHUD {
     private static var activeWindow: NSPanel?
     private static var dismissTask: Task<Void, Never>?
 
-    public static func show(_ message: String, duration: Double = 1.15) {
+    public static func show(
+        _ message: String,
+        symbol: String = "checkmark.circle.fill",
+        tint: NSColor = NSColor(srgbRed: 0.19, green: 0.82, blue: 0.48, alpha: 1.0),
+        duration: Double = 1.45
+    ) {
         dismissTask?.cancel()
         activeWindow?.orderOut(nil)
 
-        let font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 13.0, weight: .medium)
         let textWidth = ceil((message as NSString).size(withAttributes: [.font: font]).width)
-        let w = max(140, textWidth + 36)
-        let h: CGFloat = 34
+        let w = max(168, textWidth + 56)
+        let h: CGFloat = 36
 
         let screen = NSScreen.main ?? NSScreen.screens.first
         let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
-        let frame = NSRect(
+        let targetY = screenFrame.maxY - 58
+        let startFrame = NSRect(
             x: screenFrame.midX - w * 0.5,
-            y: screenFrame.maxY - 56,
+            y: targetY + 6,
+            width: w,
+            height: h
+        )
+        let finalFrame = NSRect(
+            x: screenFrame.midX - w * 0.5,
+            y: targetY,
             width: w,
             height: h
         )
 
         let panel = NSPanel(
-            contentRect: frame,
+            contentRect: startFrame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -646,25 +840,40 @@ public enum ToastHUD {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         let visual = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+        visual.appearance = NSAppearance(named: .vibrantDark)
         visual.material = .hudWindow
+        visual.blendingMode = .behindWindow
         visual.state = .active
         visual.wantsLayer = true
         visual.layer?.cornerRadius = h * 0.5
+        visual.layer?.cornerCurve = .continuous
         visual.layer?.masksToBounds = true
+        visual.layer?.borderWidth = 0.8
+        visual.layer?.borderColor = NSColor(calibratedWhite: 1.0, alpha: 0.16).cgColor
+
+        let symCfg = NSImage.SymbolConfiguration(pointSize: 14.5, weight: .semibold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [tint]))
+        if let symImg = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(symCfg) {
+            let iconView = NSImageView(image: symImg)
+            iconView.frame = NSRect(x: 14, y: (h - 18) * 0.5, width: 18, height: 18)
+            visual.addSubview(iconView)
+        }
 
         let label = NSTextField(labelWithString: message)
         label.font = font
-        label.textColor = .labelColor
-        label.alignment = .center
-        label.frame = NSRect(x: 12, y: (h - 19) * 0.5, width: w - 24, height: 19)
+        label.textColor = NSColor(calibratedWhite: 0.98, alpha: 0.96)
+        label.alignment = .left
+        label.frame = NSRect(x: 37, y: (h - 19) * 0.5, width: w - 51, height: 19)
         visual.addSubview(label)
 
         panel.contentView = visual
         panel.alphaValue = 0
         panel.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.14
+            ctx.duration = 0.16
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1.0
+            panel.animator().setFrame(finalFrame, display: true)
         }
         activeWindow = panel
 
@@ -673,6 +882,7 @@ public enum ToastHUD {
             guard !Task.isCancelled else { return }
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.18
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
                 panel.animator().alphaValue = 0
             }, completionHandler: {
                 Task { @MainActor in

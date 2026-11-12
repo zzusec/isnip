@@ -265,5 +265,95 @@ final class AirSnipCoreTests: XCTestCase {
         let legacyHotkeyJSON = #"{"screenshot":{"keyCode":122,"modifiers":0}}"#.data(using: .utf8)!
         let decodedHK = try JSONDecoder().decode(HotkeyConfig.self, from: legacyHotkeyJSON)
         XCTAssertEqual(decodedHK.ocrCapture.displayString, "F2")
+
+        // Legacy v0.2.x AirSnipConfig JSON without smartPngCompression must upgrade with smartPngCompression == true!
+        let legacyConfigJSON = #"{"autoStart":false,"theme":"follow","windowSnap":true}"#.data(using: .utf8)!
+        let decodedCfg = try JSONDecoder().decode(AirSnipConfig.self, from: legacyConfigJSON)
+        XCTAssertTrue(decodedCfg.smartPngCompression)
+        XCTAssertTrue(decodedCfg.compressClipboardPng)
+        XCTAssertEqual(decodedCfg.pngCompressionQuality, .visuallyLossless)
+        XCTAssertTrue(decodedCfg.nameStyle.formatBaseName().hasPrefix("isnip-"))
+    }
+
+    func testPngSmartCompressorPipelineShrinksAndPreservesValidImage() throws {
+        XCTAssertTrue(PngSmartCompressor.hasBundledOrSystemTools)
+        let w = 520
+        let h = 340
+        let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: w * 4,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            XCTFail("Failed to create CGContext")
+            return
+        }
+
+        // Render a realistic multi-stop macOS wallpaper + anti-aliased translucent UI cards
+        let bgColors = [
+            CGColor(srgbRed: 0.07, green: 0.19, blue: 0.48, alpha: 1.0),
+            CGColor(srgbRed: 0.16, green: 0.48, blue: 0.84, alpha: 1.0),
+            CGColor(srgbRed: 0.92, green: 0.56, blue: 0.34, alpha: 1.0),
+        ] as CFArray
+        if let grad = CGGradient(colorsSpace: cs, colors: bgColors, locations: [0.0, 0.55, 1.0]) {
+            ctx.drawLinearGradient(
+                grad,
+                start: CGPoint(x: 0, y: CGFloat(h)),
+                end: CGPoint(x: CGFloat(w), y: 0),
+                options: []
+            )
+        }
+        for i in 0..<6 {
+            let fi = CGFloat(i)
+            ctx.setFillColor(CGColor(srgbRed: 0.98, green: 0.99, blue: 1.0, alpha: 0.82 - fi * 0.08))
+            let card = CGPath(
+                roundedRect: CGRect(x: 36 + fi * 22, y: 28 + fi * 18, width: 260, height: 140),
+                cornerWidth: 14,
+                cornerHeight: 14,
+                transform: nil
+            )
+            ctx.addPath(card)
+            ctx.fillPath()
+        }
+        guard let cg = ctx.makeImage() else {
+            XCTFail("Failed to build realistic screenshot CGImage")
+            return
+        }
+
+        let report = try ImageEncoder.encodePNGWithReport(
+            cg,
+            smartCompression: true,
+            quality: .visuallyLossless,
+            mode: .fullPipeline(oxipngMax: true)
+        )
+        XCTAssertTrue(report.usedPngquant)
+        XCTAssertTrue(report.usedOxipng)
+        XCTAssertLessThan(report.compressedBytes, (report.originalBytes * 65) / 100)
+
+        // Two-stage flow (fastQuantizeOnly -> optimizeWithOxipng) used for 0ms clipboard & atomic save
+        let rawPng = try ImageEncoder.encode(cg, format: .png, smartPngCompression: false)
+        let stage1 = PngSmartCompressor.compress(rawPng, quality: .balanced, mode: .fastQuantizeOnly)
+        XCTAssertTrue(stage1.usedPngquant)
+        XCTAssertFalse(stage1.usedOxipng)
+        let stage2 = PngSmartCompressor.optimizeWithOxipng(
+            stage1.data,
+            originalBytes: rawPng.count,
+            usedPngquant: stage1.usedPngquant,
+            oxipngMax: true
+        )
+        XCTAssertTrue(stage2.usedOxipng)
+        XCTAssertLessThanOrEqual(stage2.compressedBytes, stage1.compressedBytes)
+
+        guard let src = CGImageSourceCreateWithData(stage2.data as CFData, nil),
+              let decoded = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+            XCTFail("Compressed PNG failed ImageIO decode")
+            return
+        }
+        XCTAssertEqual(decoded.width, w)
+        XCTAssertEqual(decoded.height, h)
     }
 }

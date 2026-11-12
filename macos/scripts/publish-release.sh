@@ -4,7 +4,7 @@
 set -eu
 
 install_local=1
-[ -z "${AIRSNIP_NO_INSTALL:-}" ] || install_local=0
+[ -z "${ISNIP_NO_INSTALL:-${AIRSNIP_NO_INSTALL:-}}" ] || install_local=0
 rest=
 for arg in "$@"; do
   case $arg in
@@ -15,7 +15,7 @@ done
 # shellcheck disable=SC2086
 set -- $rest
 
-CODE_REPO=zzusec/airsnip
+CODE_REPO=zzusec/isnip
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$root"
@@ -36,7 +36,7 @@ if not re.fullmatch(r'\d+\.\d+\.\d+', sys.argv[1]):
 PY
 
 pub_repo=$(/usr/libexec/PlistBuddy -c 'Print :AirSnipUpdateRepository' "$plist")
-[ "$pub_repo" = zzusec/airsnip-releases ] || die "公开升级仓库不匹配；停止发布"
+[ "$pub_repo" = zzusec/isnip-releases ] || die "公开升级仓库不匹配；停止发布"
 
 branch=$(git symbolic-ref --quiet --short HEAD) || die "请在临时分支发布，不能使用 detached HEAD"
 [ "$branch" != main ] || die "发布前只允许提交到临时分支，不能从 main 直接发布"
@@ -58,7 +58,7 @@ fi
 
 api() { curl -sS -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "$@"; }
 
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/airsnip-publish.XXXXXX")
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/isnip-publish.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 
 api -f "https://api.github.com/repos/$CODE_REPO" -o "$scratch/repository.json"
@@ -73,17 +73,17 @@ for repo in "$CODE_REPO" "$pub_repo"; do
   [ "$code" = 404 ] || die "$repo 已存在 v${version}（HTTP ${code}）：请递增版本号"
 done
 
-echo "== 打包 v$version =="
+echo "== 打包 iSnip v$version =="
 sh macos/scripts/release-app.sh "$version"
 [ "$(git rev-parse HEAD)" = "$sha" ] || die "打包期间 HEAD 已改变；未创建 Release"
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die "打包期间源码已改变；未创建 Release"
 
 dist=$root/macos/dist
-base=airsnip-macos-arm64-v$version
+base=isnip-macos-arm64-v$version
 assets="$base.dmg $base.dmg.sha256 $base.zip $base.zip.sha256"
 for f in $assets; do [ -s "$dist/$f" ] || die "缺少产物 $dist/$f"; done
-source=airsnip-source-v$version.zip
-git archive --format=zip --prefix="airsnip-v$version/" --output="$dist/$source" "$sha"
+source=isnip-source-v$version.zip
+git archive --format=zip --prefix="isnip-v$version/" --output="$dist/$source" "$sha"
 ( cd "$dist" && shasum -a 256 "$source" > "$source.sha256" )
 
 ( cd "$dist" && shasum -a 256 -c "$base.dmg.sha256" && shasum -a 256 -c "$base.zip.sha256" ) \
@@ -91,7 +91,7 @@ git archive --format=zip --prefix="airsnip-v$version/" --output="$dist/$source" 
 
 notes=$scratch/notes.md
 awk -v head="## macOS v$version" 'index($0, head) == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md > "$notes"
-[ -s "$notes" ] || echo "macOS v$version" > "$notes"
+[ -s "$notes" ] || echo "iSnip macOS v$version" > "$notes"
 
 publish() {
   repo=$1
@@ -100,7 +100,7 @@ publish() {
   url=$(REPO="$repo" TAG="v$version" TARGET="$target" NOTES="$notes" TOKEN="$TOKEN" python3 - <<'PY'
 import json, os, subprocess, sys
 
-body = {'tag_name': os.environ['TAG'], 'name': 'macOS ' + os.environ['TAG'],
+body = {'tag_name': os.environ['TAG'], 'name': 'iSnip macOS ' + os.environ['TAG'],
         'body': open(os.environ['NOTES']).read()}
 if os.environ['TARGET']:
     body['target_commitish'] = os.environ['TARGET']
@@ -175,4 +175,4 @@ git push origin "$sha:refs/heads/main" || die "main 快进更新失败；请检�
 [ "$install_local" = 1 ] || { echo "（--no-install：跳过本机安装）"; exit 0; }
 echo
 echo "== 安装到本机 =="
-sh macos/scripts/install-local.sh --built "$dist/AirSnip.app"
+sh macos/scripts/install-local.sh --built "$dist/iSnip.app"

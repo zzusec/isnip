@@ -2,13 +2,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "AirSnip",
+    name: "iSnip",
     platforms: [
         .macOS(.v14)
     ],
     products: [
         .library(name: "AirSnipCore", targets: ["AirSnipCore"]),
-        .executable(name: "AirSnip", targets: ["AirSnipApp"])
+        .executable(name: "iSnip", targets: ["AirSnipApp"])
     ],
     targets: [
         .target(

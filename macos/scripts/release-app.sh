@@ -9,18 +9,18 @@ fi
 version=${version#v}
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-AIRSNIP_VERSION="$version" sh "$root/scripts/build-app.sh"
+ISNIP_VERSION="$version" sh "$root/scripts/build-app.sh"
 
-archive="$root/dist/airsnip-macos-arm64-v${version}.zip"
-dmg="$root/dist/airsnip-macos-arm64-v${version}.dmg"
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/airsnip-dmg.XXXXXX")
+archive="$root/dist/isnip-macos-arm64-v${version}.zip"
+dmg="$root/dist/isnip-macos-arm64-v${version}.dmg"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/isnip-dmg.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 
 rm -f "$archive" "$archive.sha256" "$dmg" "$dmg.sha256"
-ditto -c -k --sequesterRsrc --keepParent "$root/dist/AirSnip.app" "$archive"
-ditto "$root/dist/AirSnip.app" "$scratch/AirSnip.app"
+ditto -c -k --sequesterRsrc --keepParent "$root/dist/iSnip.app" "$archive"
+ditto "$root/dist/iSnip.app" "$scratch/iSnip.app"
 ln -s /Applications "$scratch/Applications"
-hdiutil create -ov -volname "AirSnip $version" -srcfolder "$scratch" -format UDZO "$dmg" >/dev/null
+hdiutil create -ov -volname "iSnip $version" -srcfolder "$scratch" -format UDZO "$dmg" >/dev/null
 (
   cd "$root/dist"
   shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256"

@@ -226,16 +226,33 @@ public final class PinWindowController: NSObject {
     }
 
     public func copyToClipboard() {
-        OutputService.copyImageToClipboard(cgImage, backingScale: backingScale)
-        ToastHUD.show("已复制贴图")
+        let cfg = manager?.getConfig?()
+        OutputService.copyImageToClipboard(cgImage, backingScale: backingScale, config: cfg) { res in
+            if res.savedRatioPercent >= 3 {
+                ToastHUD.show("已复制贴图 · \(res.compactBadgeSummary)")
+            } else {
+                ToastHUD.show("已复制贴图")
+            }
+        }
     }
 
     public func saveAs() {
         guard var cfg = manager?.getConfig?() else { return }
-        if OutputService.presentSaveDialog(for: cgImage, config: &cfg, parentWindow: window) != nil {
+        let showToast = cfg.showCompletionToast
+        if let savedURL = OutputService.presentSaveDialog(
+            for: cgImage,
+            config: &cfg,
+            parentWindow: window,
+            onFinalCompressed: { url, finalRes in
+                guard showToast else { return }
+                ToastHUD.show("已保存 \(url.lastPathComponent) · \(finalRes.formattedSummary)")
+            }
+        ) {
             let finalCfg = cfg
             manager?.updateConfig? { $0 = finalCfg }
-            ToastHUD.show("贴图已保存")
+            if !(finalCfg.lastSaveFormat == .png && finalCfg.smartPngCompression) {
+                ToastHUD.show("已保存 \(savedURL.lastPathComponent)")
+            }
         }
     }
 
@@ -272,24 +289,45 @@ private final class PinCanvasView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let owner, let ctx = NSGraphicsContext.current?.cgContext else { return }
+        let r: CGFloat = 6.5
+        let clipPath = CGPath(roundedRect: bounds, cornerWidth: r, cornerHeight: r, transform: nil)
+
+        ctx.saveGState()
+        ctx.addPath(clipPath)
+        ctx.clip()
         ctx.interpolationQuality = .high
         ctx.draw(owner.cgImage, in: bounds)
+        ctx.restoreGState()
 
         if owner.showBorder {
-            ctx.setStrokeColor(CGColor(srgbRed: 0.12, green: 0.53, blue: 0.90, alpha: 0.95))
+            let insetRect = bounds.insetBy(dx: 0.75, dy: 0.75)
+            let borderPath = CGPath(roundedRect: insetRect, cornerWidth: max(1, r - 0.75), cornerHeight: max(1, r - 0.75), transform: nil)
+            ctx.addPath(borderPath)
+            ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.92))
             ctx.setLineWidth(1.5)
-            ctx.stroke(bounds.insetBy(dx: 0.75, dy: 0.75))
+            ctx.strokePath()
+        } else {
+            // Subtle crisp hairline rim even when blue border is toggled off so light-on-light pins stay defined
+            let insetRect = bounds.insetBy(dx: 0.5, dy: 0.5)
+            let borderPath = CGPath(roundedRect: insetRect, cornerWidth: max(1, r - 0.5), cornerHeight: max(1, r - 0.5), transform: nil)
+            ctx.addPath(borderPath)
+            ctx.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.14))
+            ctx.setLineWidth(0.8)
+            ctx.strokePath()
         }
 
         if let badge = badgeText {
             let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
             let sz = (badge as NSString).size(withAttributes: attrs)
-            let pill = NSRect(x: 8, y: bounds.height - sz.height - 14, width: sz.width + 14, height: sz.height + 6)
-            let path = NSBezierPath(roundedRect: pill, xRadius: 5, yRadius: 5)
-            NSColor(calibratedWhite: 0.08, alpha: 0.78).setFill()
+            let pill = NSRect(x: 9, y: bounds.height - sz.height - 15, width: sz.width + 16, height: sz.height + 7)
+            let path = NSBezierPath(roundedRect: pill, xRadius: pill.height * 0.5, yRadius: pill.height * 0.5)
+            NSColor(calibratedWhite: 0.08, alpha: 0.80).setFill()
             path.fill()
-            (badge as NSString).draw(at: NSPoint(x: pill.minX + 7, y: pill.minY + 3), withAttributes: attrs)
+            NSColor(calibratedWhite: 1.0, alpha: 0.18).setStroke()
+            path.lineWidth = 0.75
+            path.stroke()
+            (badge as NSString).draw(at: NSPoint(x: pill.minX + 8, y: pill.minY + 3.5), withAttributes: attrs)
         }
     }
 

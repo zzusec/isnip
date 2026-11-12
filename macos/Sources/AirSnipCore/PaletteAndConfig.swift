@@ -561,9 +561,9 @@ public enum NameStyle: String, Codable, CaseIterable, Sendable {
 
     public var title: String {
         switch self {
-        case .datetime: return "日期 + 时间（airsnip-20261112-093000）"
+        case .datetime: return "日期 + 时间（isnip-20261112-093000）"
         case .timestamp: return "时间戳（Unix 毫秒）"
-        case .date: return "仅日期（airsnip-20261112）"
+        case .date: return "仅日期（isnip-20261112）"
         }
     }
 
@@ -578,11 +578,41 @@ public enum NameStyle: String, Codable, CaseIterable, Sendable {
         let ss = comps.second ?? 0
         switch self {
         case .datetime:
-            return String(format: "airsnip-%04d%02d%02d-%02d%02d%02d", y, m, d, hh, mm, ss)
+            return String(format: "isnip-%04d%02d%02d-%02d%02d%02d", y, m, d, hh, mm, ss)
         case .timestamp:
             return "\(Int64(date.timeIntervalSince1970 * 1000.0))"
         case .date:
-            return String(format: "airsnip-%04d%02d%02d", y, m, d)
+            return String(format: "isnip-%04d%02d%02d", y, m, d)
+        }
+    }
+}
+
+public enum PngCompressionQualityPreset: String, Codable, CaseIterable, Sendable {
+    case visuallyLossless = "default"
+    case balanced = "65-90"
+    case compact = "45-75"
+
+    public var title: String {
+        switch self {
+        case .visuallyLossless: return "视觉无损（默认，推荐）"
+        case .balanced: return "均衡高压缩（--quality 65-90）"
+        case .compact: return "极限小体积（--quality 45-75）"
+        }
+    }
+
+    public var shortTitle: String {
+        switch self {
+        case .visuallyLossless: return "视觉无损"
+        case .balanced: return "均衡 (65-90)"
+        case .compact: return "极限 (45-75)"
+        }
+    }
+
+    public var qualityArgument: String? {
+        switch self {
+        case .visuallyLossless: return nil
+        case .balanced: return "65-90"
+        case .compact: return "45-75"
         }
     }
 }
@@ -683,6 +713,9 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
     public var nameStyle: NameStyle
     public var lastSaveFormat: ExportImageFormat
     public var lastSaveDirectory: String?
+    public var smartPngCompression: Bool
+    public var pngCompressionQuality: PngCompressionQualityPreset
+    public var compressClipboardPng: Bool
     public var longshotMaxHeight: Int
     public var autoCheckUpdate: Bool
     public var skippedVersion: String?
@@ -711,6 +744,9 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         nameStyle: NameStyle = .datetime,
         lastSaveFormat: ExportImageFormat = .png,
         lastSaveDirectory: String? = nil,
+        smartPngCompression: Bool = true,
+        pngCompressionQuality: PngCompressionQualityPreset = .visuallyLossless,
+        compressClipboardPng: Bool = true,
         longshotMaxHeight: Int = 30000,
         autoCheckUpdate: Bool = true,
         skippedVersion: String? = nil,
@@ -738,19 +774,80 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         self.nameStyle = nameStyle
         self.lastSaveFormat = lastSaveFormat
         self.lastSaveDirectory = lastSaveDirectory
+        self.smartPngCompression = smartPngCompression
+        self.pngCompressionQuality = pngCompressionQuality
+        self.compressClipboardPng = compressClipboardPng
         self.longshotMaxHeight = max(2000, longshotMaxHeight)
         self.autoCheckUpdate = autoCheckUpdate
         self.skippedVersion = skippedVersion
         self.ocr = ocr
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case autoStart, theme, hotkeys, toolKeys, pinPosition, pinBorder, pinMaxCount, uiScale
+        case swatchColors, activeColorIndex, lastTool, defaultLineWidth, defaultBlurRadius
+        case defaultFontSize, defaultFontFamily, windowSnap, confirmCancel, showCompletionToast
+        case toolbar, nameStyle, lastSaveFormat, lastSaveDirectory
+        case smartPngCompression, pngCompressionQuality, compressClipboardPng
+        case longshotMaxHeight, autoCheckUpdate, skippedVersion, ocr
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = AirSnipConfig()
+        self.autoStart = try c.decodeIfPresent(Bool.self, forKey: .autoStart) ?? d.autoStart
+        self.theme = try c.decodeIfPresent(ThemeSetting.self, forKey: .theme) ?? d.theme
+        self.hotkeys = try c.decodeIfPresent(HotkeyConfig.self, forKey: .hotkeys) ?? d.hotkeys
+        self.toolKeys = try c.decodeIfPresent(ToolKeysConfig.self, forKey: .toolKeys) ?? d.toolKeys
+        self.pinPosition = try c.decodeIfPresent(PinPosition.self, forKey: .pinPosition) ?? d.pinPosition
+        self.pinBorder = try c.decodeIfPresent(Bool.self, forKey: .pinBorder) ?? d.pinBorder
+        self.pinMaxCount = try c.decodeIfPresent(Int.self, forKey: .pinMaxCount) ?? d.pinMaxCount
+        self.uiScale = try c.decodeIfPresent(UiScaleSetting.self, forKey: .uiScale) ?? d.uiScale
+        let decodedSwatches = try c.decodeIfPresent([RGBAColor].self, forKey: .swatchColors) ?? d.swatchColors
+        self.swatchColors = decodedSwatches.count == ColorPalette.swatchCount ? decodedSwatches : ColorPalette.defaultSwatches
+        self.activeColorIndex = max(0, min(ColorPalette.swatchCount - 1, try c.decodeIfPresent(Int.self, forKey: .activeColorIndex) ?? d.activeColorIndex))
+        self.lastTool = try c.decodeIfPresent(AnnotationTool.self, forKey: .lastTool) ?? d.lastTool
+        self.defaultLineWidth = try c.decodeIfPresent(Double.self, forKey: .defaultLineWidth) ?? d.defaultLineWidth
+        self.defaultBlurRadius = try c.decodeIfPresent(Double.self, forKey: .defaultBlurRadius) ?? d.defaultBlurRadius
+        self.defaultFontSize = try c.decodeIfPresent(Double.self, forKey: .defaultFontSize) ?? d.defaultFontSize
+        self.defaultFontFamily = try c.decodeIfPresent(String.self, forKey: .defaultFontFamily) ?? d.defaultFontFamily
+        self.windowSnap = try c.decodeIfPresent(Bool.self, forKey: .windowSnap) ?? d.windowSnap
+        self.confirmCancel = try c.decodeIfPresent(Bool.self, forKey: .confirmCancel) ?? d.confirmCancel
+        self.showCompletionToast = try c.decodeIfPresent(Bool.self, forKey: .showCompletionToast) ?? d.showCompletionToast
+        self.toolbar = try c.decodeIfPresent(ToolbarVisibilityConfig.self, forKey: .toolbar) ?? d.toolbar
+        self.nameStyle = try c.decodeIfPresent(NameStyle.self, forKey: .nameStyle) ?? d.nameStyle
+        self.lastSaveFormat = try c.decodeIfPresent(ExportImageFormat.self, forKey: .lastSaveFormat) ?? d.lastSaveFormat
+        self.lastSaveDirectory = try c.decodeIfPresent(String.self, forKey: .lastSaveDirectory)
+        self.smartPngCompression = try c.decodeIfPresent(Bool.self, forKey: .smartPngCompression) ?? true
+        self.pngCompressionQuality = try c.decodeIfPresent(PngCompressionQualityPreset.self, forKey: .pngCompressionQuality) ?? .visuallyLossless
+        self.compressClipboardPng = try c.decodeIfPresent(Bool.self, forKey: .compressClipboardPng) ?? true
+        self.longshotMaxHeight = max(2000, min(100000, try c.decodeIfPresent(Int.self, forKey: .longshotMaxHeight) ?? d.longshotMaxHeight))
+        self.autoCheckUpdate = try c.decodeIfPresent(Bool.self, forKey: .autoCheckUpdate) ?? d.autoCheckUpdate
+        self.skippedVersion = try c.decodeIfPresent(String.self, forKey: .skippedVersion)
+        self.ocr = try c.decodeIfPresent(OcrConfig.self, forKey: .ocr) ?? d.ocr
+    }
+
     public static func defaultConfigFileURL() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return base.appendingPathComponent("iSnip", isDirectory: true).appendingPathComponent("config.json")
+    }
+
+    public static func legacyConfigFileURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         return base.appendingPathComponent("AirSnip", isDirectory: true).appendingPathComponent("config.json")
     }
 
     public static func load(from url: URL = defaultConfigFileURL()) -> AirSnipConfig {
+        let fm = FileManager.default
+        if url == defaultConfigFileURL(), !fm.fileExists(atPath: url.path) {
+            let legacy = legacyConfigFileURL()
+            if fm.fileExists(atPath: legacy.path) {
+                try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? fm.copyItem(at: legacy, to: url)
+            }
+        }
         guard let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode(AirSnipConfig.self, from: data) else {
             return AirSnipConfig()
