@@ -12,6 +12,70 @@ private final class OverlayPanel: NSPanel {
 }
 
 @MainActor
+private enum DirectionalResizeCursor {
+    private static var cache: [Int: NSCursor] = [:]
+
+    static func cursor(for handle: ResizeHandle) -> NSCursor {
+        let angleSteps: Int
+        switch handle {
+        case .left, .right:
+            angleSteps = 0      // 0°  (↔)
+        case .topLeft, .bottomRight:
+            angleSteps = 45     // 45° (↖↘)
+        case .top, .bottom:
+            angleSteps = 90     // 90° (↕)
+        case .topRight, .bottomLeft:
+            angleSteps = -45    // -45° (↙↗)
+        }
+        if let existing = cache[angleSteps] {
+            return existing
+        }
+        let size = NSSize(width: 20, height: 20)
+        let img = NSImage(size: size, flipped: true) { _ in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.translateBy(x: 10, y: 10)
+            ctx.rotate(by: CGFloat(angleSteps) * .pi / 180.0)
+
+            // Build double-headed arrow silhouette centered at (0, 0) along X axis
+            let p = CGMutablePath()
+            let tip: CGFloat = 7.6
+            let headBase: CGFloat = 3.4
+            let wing: CGFloat = 3.5
+            let shaftHalf: CGFloat = 1.05
+
+            p.move(to: CGPoint(x: -tip, y: 0))
+            p.addLine(to: CGPoint(x: -headBase, y: -wing))
+            p.addLine(to: CGPoint(x: -headBase, y: -shaftHalf))
+            p.addLine(to: CGPoint(x: headBase, y: -shaftHalf))
+            p.addLine(to: CGPoint(x: headBase, y: -wing))
+            p.addLine(to: CGPoint(x: tip, y: 0))
+            p.addLine(to: CGPoint(x: headBase, y: wing))
+            p.addLine(to: CGPoint(x: headBase, y: shaftHalf))
+            p.addLine(to: CGPoint(x: -headBase, y: shaftHalf))
+            p.addLine(to: CGPoint(x: -headBase, y: wing))
+            p.closeSubpath()
+
+            ctx.saveGState()
+            ctx.setShadow(offset: CGSize(width: 0, height: 0.8), blur: 1.6, color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.35))
+            ctx.addPath(p)
+            ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            ctx.setLineWidth(2.2)
+            ctx.setLineJoin(.round)
+            ctx.strokePath()
+            ctx.restoreGState()
+
+            ctx.addPath(p)
+            ctx.setFillColor(CGColor(srgbRed: 0.08, green: 0.09, blue: 0.11, alpha: 1))
+            ctx.fillPath()
+            return true
+        }
+        let c = NSCursor(image: img, hotSpot: NSPoint(x: 10, y: 10))
+        cache[angleSteps] = c
+        return c
+    }
+}
+
+@MainActor
 public final class CaptureSessionCoordinator {
     public enum SessionMode {
         case normalCapture
@@ -419,6 +483,7 @@ final class OverlayCanvasView: NSView {
         case adjustingCurveControl(id: UUID, controlIndex: Int, undoRecorded: Bool)
         case adjustingColorSV(swatchIndex: Int)
         case adjustingColorHue(swatchIndex: Int)
+        case pressingToolbarItem(id: String)
     }
 
     private var dragOp: DragOperation = .none
@@ -436,8 +501,10 @@ final class OverlayCanvasView: NSView {
     private var mainToolbarRect: CGRect = .zero
     private var secondRowRect: CGRect = .zero
 
-    // Hover tooltip (EDT-10: 400ms delay)
+    // Hover & press state + tooltip (EDT-10: 400ms delay)
     private var hoveredItemID: String?
+    private var pressedItemID: String?
+    private var hoveredResizeHandle: ResizeHandle?
     private var activeTooltip: (text: String, anchorRect: CGRect)?
     private var tooltipTask: Task<Void, Never>?
 
@@ -510,6 +577,8 @@ final class OverlayCanvasView: NSView {
         commitInlineEditorsIfNeeded()
         selection = nil
         activeTool = nil
+        pressedItemID = nil
+        hoveredResizeHandle = nil
         document.clearAll()
         colorPicker = nil
         needsDisplay = true
@@ -518,13 +587,14 @@ final class OverlayCanvasView: NSView {
     func renderVerificationSample(selection sel: ASRect) -> (toolbarIDs: [String], hasSecondaryBar: Bool, croppedImage: CGImage?) {
         self.selection = sel
         self.activeTool = nil
+        self.colorPicker = nil
         self.needsDisplay = true
         var cropped: CGImage?
         if let rep = bitmapImageRepForCachingDisplay(in: bounds) {
             cacheDisplay(in: bounds, to: rep)
             if let fullCG = rep.cgImage, mainToolbarRect != .zero {
                 let scale = CGFloat(fullCG.width) / max(1, bounds.width)
-                let cropPt = mainToolbarRect.insetBy(dx: -16, dy: -22)
+                let cropPt = mainToolbarRect.insetBy(dx: -18, dy: -26)
                 let clamped = cropPt.intersection(bounds)
                 let pxRect = CGRect(
                     x: (clamped.minX * scale).rounded(),
@@ -535,7 +605,68 @@ final class OverlayCanvasView: NSView {
                 cropped = fullCG.cropping(to: pxRect)
             }
         }
-        return (toolbarHitItems.map(\.id), secondRowRect != .zero, cropped)
+        let ids = toolbarHitItems.map(\.id)
+        let hadSub = (secondRowRect != .zero)
+
+        // Optional rich multi-state verification dump for visual inspection
+        if let dirPath = ProcessInfo.processInfo.environment["AIRSNIP_SMOKE_PREVIEW_DIR"] {
+            let dirURL = URL(fileURLWithPath: dirPath)
+            try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+            func dumpRegion(_ name: String, computeRect: () -> CGRect) {
+                guard let rep = bitmapImageRepForCachingDisplay(in: bounds) else { return }
+                cacheDisplay(in: bounds, to: rep)
+                guard let fullCG = rep.cgImage else { return }
+                let scale = CGFloat(fullCG.width) / max(1, bounds.width)
+                let clamped = computeRect().intersection(bounds)
+                let pxRect = CGRect(
+                    x: (clamped.minX * scale).rounded(),
+                    y: (clamped.minY * scale).rounded(),
+                    width: max(1, (clamped.width * scale).rounded()),
+                    height: max(1, (clamped.height * scale).rounded())
+                )
+                if let sub = fullCG.cropping(to: pxRect),
+                   let png = NSBitmapImageRep(cgImage: sub).representation(using: .png, properties: [:]) {
+                    try? png.write(to: dirURL.appendingPathComponent(name))
+                }
+            }
+            // 1. Selection corner + dimension pill + main bar
+            dumpRegion("01_selection_and_toolbar_light.png") {
+                sel.cgRect.union(mainToolbarRect).insetBy(dx: -24, dy: -32)
+            }
+
+            // 2. Rect tool active -> callout popover with stroke dots + fill + circular swatches
+            selectTool(.rect)
+            dumpRegion("02_rect_subbar_light.png") {
+                mainToolbarRect.union(secondRowRect).insetBy(dx: -18, dy: -16)
+            }
+
+            // 3. Double-click swatch -> smooth HSV color picker popover
+            openColorPicker(for: activeColorIndex, anchorRect: secondRowRect)
+            dumpRegion("03_color_picker_light.png") {
+                let pRect = colorPicker?.panelRect ?? .zero
+                return mainToolbarRect.union(secondRowRect).union(pRect).insetBy(dx: -18, dy: -16)
+            }
+            colorPicker = nil
+
+            // 4. Text tool active -> typography callout popover
+            selectTool(.text)
+            dumpRegion("04_text_subbar_light.png") {
+                mainToolbarRect.union(secondRowRect).insetBy(dx: -18, dy: -16)
+            }
+
+            // 5. Dark mode toolbar
+            let prevTheme = coordinator?.config.theme ?? .follow
+            coordinator?.mutateConfig { $0.theme = .dark }
+            activeTool = nil
+            needsDisplay = true
+            dumpRegion("05_toolbar_dark.png") {
+                mainToolbarRect.insetBy(dx: -18, dy: -22)
+            }
+            coordinator?.mutateConfig { $0.theme = prevTheme }
+            activeTool = nil
+        }
+
+        return (ids, hadSub, cropped)
     }
 
     private var currentSwatchColor: RGBAColor {
@@ -553,6 +684,157 @@ final class OverlayCanvasView: NSView {
             let name = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
             return name == .darkAqua
         }
+    }
+
+    // MARK: - Pixel Snapping & Frosted Glass Material Helpers
+
+    private func pixelSnap(_ value: CGFloat, lineWidth: CGFloat) -> CGFloat {
+        let s = CGFloat(max(1.0, snapshot.backingScale))
+        let pxW = max(1, Int((lineWidth * s).rounded()))
+        if pxW % 2 == 0 {
+            return (value * s).rounded() / s
+        } else {
+            return (floor(value * s) + 0.5) / s
+        }
+    }
+
+    private func pixelSnapRect(_ rect: CGRect, lineWidth: CGFloat) -> CGRect {
+        let x0 = pixelSnap(rect.minX, lineWidth: lineWidth)
+        let y0 = pixelSnap(rect.minY, lineWidth: lineWidth)
+        let x1 = pixelSnap(rect.maxX, lineWidth: lineWidth)
+        let y1 = pixelSnap(rect.maxY, lineWidth: lineWidth)
+        return CGRect(x: x0, y: y0, width: max(1, x1 - x0), height: max(1, y1 - y0))
+    }
+
+    private func makeCalloutBubblePath(
+        rect: CGRect,
+        cornerRadius r0: CGFloat,
+        arrowX: CGFloat?,
+        arrowOnTop: Bool,
+        arrowWidth: CGFloat = 11.0,
+        arrowHeight: CGFloat = 5.5
+    ) -> CGPath {
+        let r = min(r0, min(rect.width, rect.height) * 0.5)
+        guard let rawAX = arrowX else {
+            return CGPath(roundedRect: rect, cornerWidth: r, cornerHeight: r, transform: nil)
+        }
+        let halfW = arrowWidth * 0.5
+        let minAX = rect.minX + r + halfW + 2
+        let maxAX = rect.maxX - r - halfW - 2
+        guard maxAX >= minAX else {
+            return CGPath(roundedRect: rect, cornerWidth: r, cornerHeight: r, transform: nil)
+        }
+        let cx = max(minAX, min(maxAX, rawAX))
+
+        let p = CGMutablePath()
+        p.move(to: CGPoint(x: rect.minX + r, y: rect.minY))
+        if arrowOnTop {
+            p.addLine(to: CGPoint(x: cx - halfW, y: rect.minY))
+            p.addLine(to: CGPoint(x: cx - 0.8, y: rect.minY - arrowHeight + 0.8))
+            p.addQuadCurve(
+                to: CGPoint(x: cx + 0.8, y: rect.minY - arrowHeight + 0.8),
+                control: CGPoint(x: cx, y: rect.minY - arrowHeight)
+            )
+            p.addLine(to: CGPoint(x: cx + halfW, y: rect.minY))
+        }
+        p.addLine(to: CGPoint(x: rect.maxX - r, y: rect.minY))
+        p.addArc(tangent1End: CGPoint(x: rect.maxX, y: rect.minY), tangent2End: CGPoint(x: rect.maxX, y: rect.minY + r), radius: r)
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - r))
+        p.addArc(tangent1End: CGPoint(x: rect.maxX, y: rect.maxY), tangent2End: CGPoint(x: rect.maxX - r, y: rect.maxY), radius: r)
+        if !arrowOnTop {
+            p.addLine(to: CGPoint(x: cx + halfW, y: rect.maxY))
+            p.addLine(to: CGPoint(x: cx + 0.8, y: rect.maxY + arrowHeight - 0.8))
+            p.addQuadCurve(
+                to: CGPoint(x: cx - 0.8, y: rect.maxY + arrowHeight - 0.8),
+                control: CGPoint(x: cx, y: rect.maxY + arrowHeight)
+            )
+            p.addLine(to: CGPoint(x: cx - halfW, y: rect.maxY))
+        }
+        p.addLine(to: CGPoint(x: rect.minX + r, y: rect.maxY))
+        p.addArc(tangent1End: CGPoint(x: rect.minX, y: rect.maxY), tangent2End: CGPoint(x: rect.minX, y: rect.maxY - r), radius: r)
+        p.addLine(to: CGPoint(x: rect.minX, y: rect.minY + r))
+        p.addArc(tangent1End: CGPoint(x: rect.minX, y: rect.minY), tangent2End: CGPoint(x: rect.minX + r, y: rect.minY), radius: r)
+        p.closeSubpath()
+        return p
+    }
+
+    private func drawFrostedMaterial(
+        in ctx: CGContext,
+        path: CGPath,
+        sampleRect: CGRect,
+        dark: Bool,
+        shadowOffsetY: CGFloat = 3.0,
+        shadowBlur: CGFloat = 14.0,
+        shadowAlpha: CGFloat = 0.22
+    ) {
+        let baseFill = dark
+            ? CGColor(srgbRed: 0.14, green: 0.15, blue: 0.17, alpha: 0.90)
+            : CGColor(srgbRed: 0.965, green: 0.969, blue: 0.976, alpha: 0.91)
+        let innerHighlight = dark
+            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.14)
+            : CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.78)
+        let outerRim = dark
+            ? CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.50)
+            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.10)
+
+        // 1. Soft ambient shadow
+        ctx.saveGState()
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: shadowOffsetY),
+            blur: shadowBlur,
+            color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: shadowAlpha)
+        )
+        ctx.addPath(path)
+        ctx.setFillColor(baseFill)
+        ctx.fillPath()
+        ctx.restoreGState()
+
+        // 2. Real underlying screen Gaussian blur + translucent material wash
+        let clampedPt = sampleRect.insetBy(dx: -2, dy: -2).intersection(bounds)
+        if clampedPt.width >= 4 && clampedPt.height >= 4 {
+            let scale = snapshot.backingScale
+            let pxRect = PixelRect(
+                x: max(0, Int((clampedPt.minX * scale).rounded(.down))),
+                y: max(0, Int((clampedPt.minY * scale).rounded(.down))),
+                width: max(1, Int((clampedPt.width * scale).rounded(.up))),
+                height: max(1, Int((clampedPt.height * scale).rounded(.up)))
+            )
+            if let sub = snapshot.rawBuffer.cropped(to: pxRect) {
+                let blurred = BoxBlurEngine.blur(sub, radius: max(6, Int((10.0 * scale).rounded())))
+                if let blurCG = blurred.makeCGImage() {
+                    ctx.saveGState()
+                    ctx.addPath(path)
+                    ctx.clip()
+                    ctx.translateBy(x: clampedPt.minX, y: clampedPt.maxY)
+                    ctx.scaleBy(x: 1, y: -1)
+                    ctx.draw(blurCG, in: CGRect(x: 0, y: 0, width: clampedPt.width, height: clampedPt.height))
+                    ctx.restoreGState()
+
+                    ctx.saveGState()
+                    ctx.addPath(path)
+                    ctx.setFillColor(baseFill)
+                    ctx.fillPath()
+                    ctx.restoreGState()
+                }
+            }
+        }
+
+        // 3. Crisp specular inner edge + hairline outer border
+        ctx.saveGState()
+        ctx.addPath(path)
+        ctx.clip()
+        ctx.addPath(path)
+        ctx.setStrokeColor(innerHighlight)
+        ctx.setLineWidth(1.0)
+        ctx.strokePath()
+        ctx.restoreGState()
+
+        ctx.saveGState()
+        ctx.addPath(path)
+        ctx.setStrokeColor(outerRim)
+        ctx.setLineWidth(0.6)
+        ctx.strokePath()
+        ctx.restoreGState()
     }
 
     // MARK: - Drawing
@@ -575,7 +857,7 @@ final class OverlayCanvasView: NSView {
             dimPath.addRect(sel.cgRect)
             ctx.addPath(dimPath)
             ctx.clip(using: .evenOdd)
-            ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.48))
+            ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.45))
             ctx.fill(bounds)
             ctx.restoreGState()
 
@@ -589,21 +871,15 @@ final class OverlayCanvasView: NSView {
                 clipBounds: sel
             )
 
-            // 4. Selection border & 4 L-shaped corner brackets
-            let accent = CGColor(srgbRed: 0.16, green: 0.68, blue: 0.98, alpha: 1.0)
-            ctx.setStrokeColor(accent)
-            ctx.setLineWidth(1.4)
-            ctx.stroke(sel.cgRect)
-            if !selectionLocked {
-                drawCornerBrackets(in: ctx, rect: sel.cgRect, color: accent)
-            }
+            // 4. Precision 1px pixel-snapped selection border & 8 circular control knots
+            drawSelectionFrameAndHandles(in: ctx, selection: sel)
 
             // 5. Selected annotation gizmos
             if let selObj = document.selectedObject {
                 AnnotationRenderer.drawSelectionGizmos(in: ctx, for: selObj)
             }
 
-            // 6. Pixel dimension pill at top-left of selection
+            // 6. Frosted pixel dimension pill at top-left of selection
             let pxW = max(1, Int((sel.width * snapshot.backingScale).rounded()))
             let pxH = max(1, Int((sel.height * snapshot.backingScale).rounded()))
             drawDimensionPill(in: ctx, selection: sel, text: "\(pxW) × \(pxH)")
@@ -611,6 +887,11 @@ final class OverlayCanvasView: NSView {
             // 7. Floating annotation toolbar + optional style sub-bar + color picker + tooltip
             if case .creatingSelection = dragOp {
                 toolbarHitItems.removeAll()
+                // Show precision pixel loupe while actively dragging/resizing selection!
+                drawMagnifierHUD(in: ctx, at: cursorPoint)
+            } else if case .resizingSelection = dragOp {
+                toolbarHitItems.removeAll()
+                drawMagnifierHUD(in: ctx, at: cursorPoint)
             } else {
                 drawFloatingToolbar(in: ctx, selection: sel)
                 if colorPicker != nil {
@@ -631,15 +912,16 @@ final class OverlayCanvasView: NSView {
                 dimPath.addRect(winRect.cgRect)
                 ctx.addPath(dimPath)
                 ctx.clip(using: .evenOdd)
-                ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.28))
+                ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.26))
                 ctx.fill(bounds)
                 ctx.restoreGState()
 
-                let snapAccent = CGColor(srgbRed: 0.16, green: 0.68, blue: 0.98, alpha: 0.95)
-                ctx.setStrokeColor(snapAccent)
-                ctx.setLineWidth(1.8)
-                ctx.stroke(winRect.cgRect)
-                drawCornerBrackets(in: ctx, rect: winRect.cgRect, color: snapAccent)
+                let snapped = pixelSnapRect(winRect.cgRect, lineWidth: 1.5)
+                ctx.setFillColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.04))
+                ctx.fill(snapped)
+                ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.95))
+                ctx.setLineWidth(1.5)
+                ctx.stroke(snapped)
 
                 let pxW = Int((winRect.width * snapshot.backingScale).rounded())
                 let pxH = Int((winRect.height * snapshot.backingScale).rounded())
@@ -658,51 +940,90 @@ final class OverlayCanvasView: NSView {
         }
     }
 
-    private func drawCornerBrackets(in ctx: CGContext, rect: CGRect, color: CGColor) {
-        let len = max(4, min(12, min(rect.width, rect.height) * 0.35))
+    private func visibleSelectionHandles(for sel: ASRect) -> [ResizeHandle] {
+        ResizeHandle.allCases.filter { h in
+            if (h == .top || h == .bottom) && sel.width < 52 { return false }
+            if (h == .left || h == .right) && sel.height < 52 { return false }
+            return true
+        }
+    }
+
+    private func drawSelectionFrameAndHandles(in ctx: CGContext, selection sel: ASRect) {
+        let accent = CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 1.0)
+        let frameRect = pixelSnapRect(sel.cgRect, lineWidth: 1.0)
+
         ctx.saveGState()
-        ctx.setStrokeColor(color)
-        ctx.setLineWidth(3.0)
-        ctx.setLineCap(.square)
-        ctx.setLineJoin(.miter)
+        // Subtle outer contrast hairline so blue border stays legible on white or cyan backgrounds
+        ctx.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.22))
+        ctx.setLineWidth(1.0)
+        ctx.stroke(frameRect.insetBy(dx: -0.6, dy: -0.6))
 
-        // Top-left
-        ctx.move(to: CGPoint(x: rect.minX, y: rect.minY + len))
-        ctx.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
-        ctx.addLine(to: CGPoint(x: rect.minX + len, y: rect.minY))
-        // Top-right
-        ctx.move(to: CGPoint(x: rect.maxX - len, y: rect.minY))
-        ctx.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        ctx.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + len))
-        // Bottom-right
-        ctx.move(to: CGPoint(x: rect.maxX, y: rect.maxY - len))
-        ctx.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        ctx.addLine(to: CGPoint(x: rect.maxX - len, y: rect.maxY))
-        // Bottom-left
-        ctx.move(to: CGPoint(x: rect.minX + len, y: rect.maxY))
-        ctx.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-        ctx.addLine(to: CGPoint(x: rect.minX, y: rect.maxY - len))
+        // Crisp 1.0pt sky-blue selection hairline
+        ctx.setStrokeColor(accent)
+        ctx.setLineWidth(1.0)
+        ctx.stroke(frameRect)
 
-        ctx.strokePath()
+        // 8 precision circular control knots (white core + sky-blue rim + subtle drop shadow)
+        if !selectionLocked {
+            for h in visibleSelectionHandles(for: sel) {
+                let p = h.position(in: sel)
+                let isHovered = (hoveredResizeHandle == h)
+                let diameter: CGFloat = isHovered ? 8.6 : 7.0
+                let knotRect = CGRect(
+                    x: CGFloat(p.x) - diameter * 0.5,
+                    y: CGFloat(p.y) - diameter * 0.5,
+                    width: diameter,
+                    height: diameter
+                )
+                ctx.saveGState()
+                ctx.setShadow(
+                    offset: CGSize(width: 0, height: 1),
+                    blur: 2.5,
+                    color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.28)
+                )
+                ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+                ctx.fillEllipse(in: knotRect)
+                ctx.restoreGState()
+
+                ctx.setStrokeColor(accent)
+                ctx.setLineWidth(isHovered ? 1.6 : 1.35)
+                ctx.strokeEllipse(in: knotRect)
+            }
+        }
         ctx.restoreGState()
     }
 
     private func drawDimensionPill(in ctx: CGContext, selection: ASRect, text: String) {
         let scaleFactor = CGFloat(coordinator?.config.uiScale.factor ?? 1.0)
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 11.5 * scaleFactor, weight: .semibold)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 11.0 * scaleFactor, weight: .medium)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor(calibratedWhite: 0.96, alpha: 1),
+            .kern: 0.2
+        ]
         let sz = (text as NSString).size(withAttributes: attrs)
-        let w = sz.width + 14 * scaleFactor
-        let h = sz.height + 6 * scaleFactor
+        let w = (sz.width + 14 * scaleFactor).rounded()
+        let h = (sz.height + 5 * scaleFactor).rounded()
         let x = max(6, min(bounds.width - w - 6, CGFloat(selection.minX)))
-        let y = selection.minY >= Double(h + 8) ? CGFloat(selection.minY) - h - 5 : CGFloat(selection.minY) + 6
+        let y = selection.minY >= Double(h + 10)
+            ? CGFloat(selection.minY) - h - 6
+            : CGFloat(selection.minY) + 7
         let pillRect = CGRect(x: x, y: y, width: w, height: h)
 
-        let path = CGPath(roundedRect: pillRect, cornerWidth: 5, cornerHeight: 5, transform: nil)
-        ctx.addPath(path)
-        ctx.setFillColor(CGColor(srgbRed: 0.08, green: 0.09, blue: 0.11, alpha: 0.82))
-        ctx.fillPath()
-        (text as NSString).draw(at: NSPoint(x: pillRect.minX + 7 * scaleFactor, y: pillRect.minY + 3 * scaleFactor), withAttributes: attrs)
+        let path = CGPath(roundedRect: pillRect, cornerWidth: 5.0 * scaleFactor, cornerHeight: 5.0 * scaleFactor, transform: nil)
+        drawFrostedMaterial(
+            in: ctx,
+            path: path,
+            sampleRect: pillRect,
+            dark: true,
+            shadowOffsetY: 1.5,
+            shadowBlur: 6,
+            shadowAlpha: 0.22
+        )
+        (text as NSString).draw(
+            at: NSPoint(x: pillRect.minX + (w - sz.width) * 0.5, y: pillRect.minY + (h - sz.height) * 0.5),
+            withAttributes: attrs
+        )
     }
 
     private func drawMagnifierHUD(in ctx: CGContext, at point: ASPoint) {
@@ -713,27 +1034,36 @@ final class OverlayCanvasView: NSView {
         let gridCells = 11
         let cellSize: CGFloat = 10
         let gridSide = CGFloat(gridCells) * cellSize
-        let cardW = gridSide + 16
-        let cardH = gridSide + 64
+        let pad: CGFloat = 8
+        let cardW = gridSide + pad * 2
+        let cardH = gridSide + pad + 56
 
         var ox = CGFloat(point.x) + 20
         var oy = CGFloat(point.y) + 20
         if ox + cardW > bounds.width - 8 { ox = CGFloat(point.x) - cardW - 20 }
         if oy + cardH > bounds.height - 8 { oy = CGFloat(point.y) - cardH - 20 }
 
-        let cardRect = CGRect(x: ox, y: oy, width: cardW, height: cardH)
-        ctx.saveGState()
-        let bgPath = CGPath(roundedRect: cardRect, cornerWidth: 9, cornerHeight: 9, transform: nil)
-        ctx.addPath(bgPath)
-        ctx.setFillColor(CGColor(srgbRed: 0.10, green: 0.11, blue: 0.13, alpha: 0.92))
-        ctx.fillPath()
-        ctx.addPath(bgPath)
-        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.16))
-        ctx.setLineWidth(1)
-        ctx.strokePath()
+        let cardRect = CGRect(x: ox.rounded(), y: oy.rounded(), width: cardW, height: cardH)
+        let bgPath = CGPath(roundedRect: cardRect, cornerWidth: 9.5, cornerHeight: 9.5, transform: nil)
+        drawFrostedMaterial(
+            in: ctx,
+            path: bgPath,
+            sampleRect: cardRect,
+            dark: true,
+            shadowOffsetY: 4,
+            shadowBlur: 14,
+            shadowAlpha: 0.30
+        )
 
-        let gx0 = cardRect.minX + 8
-        let gy0 = cardRect.minY + 8
+        ctx.saveGState()
+        let gx0 = cardRect.minX + pad
+        let gy0 = cardRect.minY + pad
+        let gridRect = CGRect(x: gx0, y: gy0, width: gridSide, height: gridSide)
+        let gridClip = CGPath(roundedRect: gridRect, cornerWidth: 5.5, cornerHeight: 5.5, transform: nil)
+
+        ctx.saveGState()
+        ctx.addPath(gridClip)
+        ctx.clip()
         let half = gridCells / 2
         for dy in -half...half {
             for dx in -half...half {
@@ -746,34 +1076,54 @@ final class OverlayCanvasView: NSView {
                 )
                 ctx.setFillColor(c.cgColor)
                 ctx.fill(r)
-                ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.08))
+                ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.06))
                 ctx.setLineWidth(0.5)
                 ctx.stroke(r)
             }
         }
-        // Highlight center pixel
-        let centerRect = CGRect(x: gx0 + CGFloat(half) * cellSize, y: gy0 + CGFloat(half) * cellSize, width: cellSize, height: cellSize)
-        ctx.setStrokeColor(CGColor(srgbRed: 0.12, green: 0.60, blue: 1.0, alpha: 1.0))
-        ctx.setLineWidth(1.8)
-        ctx.stroke(centerRect)
+        // Subtle crosshair bands + crisp center pixel reticle
+        let centerRect = CGRect(
+            x: gx0 + CGFloat(half) * cellSize,
+            y: gy0 + CGFloat(half) * cellSize,
+            width: cellSize,
+            height: cellSize
+        )
+        ctx.setFillColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.14))
+        ctx.fill(CGRect(x: centerRect.minX, y: gy0, width: cellSize, height: gridSide))
+        ctx.fill(CGRect(x: gx0, y: centerRect.minY, width: gridSide, height: cellSize))
 
-        // Color swatch + coordinate + HEX
+        ctx.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.55))
+        ctx.setLineWidth(2.2)
+        ctx.stroke(centerRect)
+        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.96))
+        ctx.setLineWidth(1.2)
+        ctx.stroke(centerRect)
+        ctx.restoreGState()
+
+        ctx.addPath(gridClip)
+        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.16))
+        ctx.setLineWidth(0.8)
+        ctx.strokePath()
+
+        // Color dot + HEX + pixel coordinate + copy hint
         let infoY = gy0 + gridSide + 7
-        let swatchRect = CGRect(x: gx0, y: infoY + 1, width: 13, height: 13)
+        let swatchRect = CGRect(x: gx0, y: infoY + 1.5, width: 12, height: 12)
         ctx.setFillColor(centerColor.cgColor)
-        ctx.fill(swatchRect)
-        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.5))
-        ctx.setLineWidth(1)
-        ctx.stroke(swatchRect)
+        ctx.fillEllipse(in: swatchRect)
+        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.65))
+        ctx.setLineWidth(1.0)
+        ctx.strokeEllipse(in: swatchRect)
 
         let monoFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
-        let subFont = NSFont.systemFont(ofSize: 9.5, weight: .regular)
+        let coordFont = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .regular)
+        let hintFont = NSFont.systemFont(ofSize: 9.0, weight: .regular)
         let primaryAttrs: [NSAttributedString.Key: Any] = [.font: monoFont, .foregroundColor: NSColor.white]
-        let secondaryAttrs: [NSAttributedString.Key: Any] = [.font: subFont, .foregroundColor: NSColor(calibratedWhite: 0.75, alpha: 1)]
+        let coordAttrs: [NSAttributedString.Key: Any] = [.font: coordFont, .foregroundColor: NSColor(calibratedWhite: 0.80, alpha: 1)]
+        let hintAttrs: [NSAttributedString.Key: Any] = [.font: hintFont, .foregroundColor: NSColor(calibratedWhite: 0.58, alpha: 1)]
 
-        (centerColor.hexString as NSString).draw(at: NSPoint(x: gx0 + 18, y: infoY), withAttributes: primaryAttrs)
-        ("(\(pxX), \(pxY))" as NSString).draw(at: NSPoint(x: gx0, y: infoY + 17), withAttributes: secondaryAttrs)
-        ("C 复制HEX · ⇧C RGB" as NSString).draw(at: NSPoint(x: gx0, y: infoY + 32), withAttributes: secondaryAttrs)
+        (centerColor.hexString as NSString).draw(at: NSPoint(x: gx0 + 17, y: infoY), withAttributes: primaryAttrs)
+        ("X:\(pxX)  Y:\(pxY)" as NSString).draw(at: NSPoint(x: gx0, y: infoY + 16), withAttributes: coordAttrs)
+        ("C 复制色值 · ⇧C RGB" as NSString).draw(at: NSPoint(x: gx0, y: infoY + 31), withAttributes: hintAttrs)
         ctx.restoreGState()
     }
 
@@ -824,29 +1174,32 @@ final class OverlayCanvasView: NSView {
         if vis.isEntireToolbarHidden { return }
 
         let uis = CGFloat(cfg.uiScale.factor)
-        let btnSide: CGFloat = 29 * uis
-        let padX: CGFloat = 8 * uis
-        let padY: CGFloat = 5 * uis
-        let gap: CGFloat = 2.5 * uis
+        let btnSide: CGFloat = 27 * uis
+        let padX: CGFloat = 9 * uis
+        let padY: CGFloat = 4 * uis
+        let gap: CGFloat = 3.5 * uis
         let barH = btnSide + padY * 2
+        let cornerRadius: CGFloat = 6.5 * uis
 
         let dark = isDarkTheme
-        let barBg = dark
-            ? CGColor(srgbRed: 0.14, green: 0.15, blue: 0.18, alpha: 0.96)
-            : CGColor(srgbRed: 0.96, green: 0.97, blue: 0.98, alpha: 0.96)
-        let barBorder = dark
-            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.14)
-            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.12)
-        let iconNormal = dark ? NSColor(calibratedWhite: 0.92, alpha: 1) : NSColor(calibratedWhite: 0.16, alpha: 1)
-        let iconDisabled = dark ? NSColor(calibratedWhite: 0.42, alpha: 1) : NSColor(calibratedWhite: 0.65, alpha: 1)
+        let iconNormal = dark ? NSColor(calibratedWhite: 0.92, alpha: 1) : NSColor(calibratedWhite: 0.14, alpha: 1)
+        let iconDisabled = dark ? NSColor(calibratedWhite: 0.40, alpha: 1) : NSColor(calibratedWhite: 0.62, alpha: 1)
         let badgeKnockout = dark
-            ? NSColor(srgbRed: 0.14, green: 0.15, blue: 0.18, alpha: 1)
-            : NSColor(srgbRed: 0.96, green: 0.97, blue: 0.98, alpha: 1)
+            ? NSColor(srgbRed: 0.14, green: 0.15, blue: 0.17, alpha: 1)
+            : NSColor(srgbRed: 0.965, green: 0.969, blue: 0.976, alpha: 1)
         let hoverBg = dark
             ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.10)
-            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.07)
-        let activeBg = CGColor(srgbRed: 0.12, green: 0.53, blue: 0.94, alpha: 0.20)
-        let activeAccent = NSColor(srgbRed: 0.12, green: 0.54, blue: 0.96, alpha: 1)
+            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.06)
+        let pressBg = dark
+            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.16)
+            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.11)
+        let activeBg = dark
+            ? CGColor(srgbRed: 0.12, green: 0.56, blue: 1.0, alpha: 0.24)
+            : CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.14)
+        let activeBorder = CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: dark ? 0.45 : 0.28)
+        let activeAccent = dark
+            ? NSColor(srgbRed: 0.36, green: 0.72, blue: 1.0, alpha: 1)
+            : NSColor(srgbRed: 0.05, green: 0.47, blue: 0.92, alpha: 1)
 
         struct BarButtonSpec {
             let id: String
@@ -956,21 +1309,22 @@ final class OverlayCanvasView: NSView {
 
         guard !items.isEmpty else { return }
 
-        let totalWidth = padX * 2 + CGFloat(items.count) * btnSide + CGFloat(max(0, items.count - 1)) * gap
-        var barX = CGFloat(selection.maxX) - totalWidth
+        let totalWidth = (padX * 2 + CGFloat(items.count) * btnSide + CGFloat(max(0, items.count - 1)) * gap).rounded()
+        var barX = (CGFloat(selection.maxX) - totalWidth).rounded()
         barX = max(8, min(bounds.width - totalWidth - 8, barX))
 
         let subMode = currentStyleSubBarMode(vis: vis)
-        let secondRowH: CGFloat = (subMode == .none) ? 0 : (32 * uis)
-        let totalStackH = barH + ((subMode == .none) ? 0 : (secondRowH + 5))
+        let secondRowH: CGFloat = (subMode == .none) ? 0 : (32 * uis).rounded()
+        let calloutGap: CGFloat = 7 * uis
+        let totalStackH = barH + ((subMode == .none) ? 0 : (secondRowH + calloutGap))
 
-        var barY = CGFloat(selection.maxY) + 8
+        var barY = (CGFloat(selection.maxY) + 8).rounded()
         if barY + totalStackH > bounds.height - 8 {
-            let aboveY = CGFloat(selection.minY) - totalStackH - 8
+            let aboveY = (CGFloat(selection.minY) - totalStackH - 8).rounded()
             if aboveY >= 8 {
                 barY = aboveY
             } else {
-                barY = CGFloat(selection.maxY) - totalStackH - 8
+                barY = (CGFloat(selection.maxY) - totalStackH - 8).rounded()
             }
         }
         barY = max(8, min(bounds.height - barH - 8, barY))
@@ -978,38 +1332,79 @@ final class OverlayCanvasView: NSView {
         let barRect = CGRect(x: barX, y: barY, width: totalWidth, height: barH)
         mainToolbarRect = barRect
 
-        ctx.saveGState()
-        ctx.setShadow(offset: CGSize(width: 0, height: 3), blur: 12, color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.25))
-        let barPath = CGPath(roundedRect: barRect, cornerWidth: 8.5 * uis, cornerHeight: 8.5 * uis, transform: nil)
-        ctx.addPath(barPath)
-        ctx.setFillColor(barBg)
-        ctx.fillPath()
-        ctx.restoreGState()
+        let barPath = CGPath(roundedRect: barRect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
+        drawFrostedMaterial(
+            in: ctx,
+            path: barPath,
+            sampleRect: barRect,
+            dark: dark,
+            shadowOffsetY: 3.5,
+            shadowBlur: 14,
+            shadowAlpha: dark ? 0.34 : 0.20
+        )
 
-        ctx.addPath(barPath)
-        ctx.setStrokeColor(barBorder)
-        ctx.setLineWidth(1)
-        ctx.strokePath()
+        let selectedObjToolKey: String? = {
+            guard let selObj = document.selectedObject else { return nil }
+            switch selObj.kind {
+            case .rect: return ToolbarSlot.tool(.rect).key
+            case .ellipse: return ToolbarSlot.tool(.ellipse).key
+            case .line: return ToolbarSlot.tool(.line).key
+            case .arrow: return ToolbarSlot.tool(.arrow).key
+            case .freehand: return ToolbarSlot.tool(.freehand).key
+            case .blur: return ToolbarSlot.tool(.blur).key
+            case .text: return ToolbarSlot.tool(.text).key
+            case .number: return ToolbarSlot.tool(.number).key
+            case .glow: return ToolbarSlot.tool(.glow).key
+            case .highlight: return ToolbarSlot.tool(.highlight).key
+            }
+        }()
 
+        var activeToolAnchorX: CGFloat?
         var curX = barRect.minX + padX
         let itemY = barRect.minY + padY
 
         for item in items {
             let itemRect = CGRect(x: curX, y: itemY, width: btnSide, height: btnSide)
+            let isPressed = (pressedItemID == item.id && item.enabled)
+            let pillRect = itemRect.insetBy(dx: 0.8 * uis, dy: 0.8 * uis)
+
             if item.selected {
-                let p = CGPath(roundedRect: itemRect, cornerWidth: 6 * uis, cornerHeight: 6 * uis, transform: nil)
+                activeToolAnchorX = itemRect.midX
+                let p = CGPath(roundedRect: pillRect, cornerWidth: 5.5 * uis, cornerHeight: 5.5 * uis, transform: nil)
                 ctx.addPath(p)
                 ctx.setFillColor(activeBg)
                 ctx.fillPath()
+                ctx.addPath(p)
+                ctx.setStrokeColor(activeBorder)
+                ctx.setLineWidth(0.75)
+                ctx.strokePath()
+            } else if isPressed {
+                let p = CGPath(roundedRect: pillRect, cornerWidth: 5.5 * uis, cornerHeight: 5.5 * uis, transform: nil)
+                ctx.addPath(p)
+                ctx.setFillColor(pressBg)
+                ctx.fillPath()
             } else if hoveredItemID == item.id && item.enabled {
-                let p = CGPath(roundedRect: itemRect, cornerWidth: 6 * uis, cornerHeight: 6 * uis, transform: nil)
+                let p = CGPath(roundedRect: pillRect, cornerWidth: 5.5 * uis, cornerHeight: 5.5 * uis, transform: nil)
                 ctx.addPath(p)
                 ctx.setFillColor(hoverBg)
                 ctx.fillPath()
             }
 
+            if activeToolAnchorX == nil, item.id == selectedObjToolKey {
+                activeToolAnchorX = itemRect.midX
+            }
+
             let tint = !item.enabled ? iconDisabled : (item.selected ? activeAccent : iconNormal)
-            drawToolbarGlyph(item.glyph, in: ctx, rect: itemRect, uis: uis, color: tint, knockoutColor: badgeKnockout)
+            if isPressed {
+                ctx.saveGState()
+                ctx.translateBy(x: itemRect.midX, y: itemRect.midY)
+                ctx.scaleBy(x: 0.92, y: 0.92)
+                ctx.translateBy(x: -itemRect.midX, y: -itemRect.midY)
+                drawToolbarGlyph(item.glyph, in: ctx, rect: itemRect, uis: uis, color: tint, knockoutColor: badgeKnockout)
+                ctx.restoreGState()
+            } else {
+                drawToolbarGlyph(item.glyph, in: ctx, rect: itemRect, uis: uis, color: tint, knockoutColor: badgeKnockout)
+            }
 
             let action = item.action
             let enabled = item.enabled
@@ -1028,11 +1423,10 @@ final class OverlayCanvasView: NSView {
                 in: ctx,
                 mode: subMode,
                 mainBar: barRect,
+                anchorX: activeToolAnchorX,
                 height: secondRowH,
                 uis: uis,
                 dark: dark,
-                barBg: barBg,
-                barBorder: barBorder,
                 textColor: iconNormal,
                 cfg: cfg
             )
@@ -1086,7 +1480,9 @@ final class OverlayCanvasView: NSView {
     ) {
         let cx = rect.midX
         let cy = rect.midY
-        let lw = 1.4 * uis
+        let backing = CGFloat(max(1.0, snapshot.backingScale))
+        // Snap stroke weight to exact integer physical pixels (2px on 2x Retina at 1.0x scale)
+        let lw = max(1.0, (1.0 * uis * backing).rounded()) / backing
 
         ctx.saveGState()
         ctx.setStrokeColor(color.cgColor)
@@ -1097,30 +1493,30 @@ final class OverlayCanvasView: NSView {
 
         switch glyph {
         case .rect:
-            let s = 14.2 * uis
-            let r = CGRect(x: cx - s * 0.5, y: cy - s * 0.5, width: s, height: s)
+            let s = 13.0 * uis
+            let r = pixelSnapRect(CGRect(x: cx - s * 0.5, y: cy - s * 0.5, width: s, height: s), lineWidth: lw)
             ctx.setLineJoin(.miter)
             ctx.stroke(r)
 
         case .ellipse:
-            let s = 14.8 * uis
+            let s = 13.6 * uis
             ctx.strokeEllipse(in: CGRect(x: cx - s * 0.5, y: cy - s * 0.5, width: s, height: s))
 
         case .line:
-            let d = 6.4 * uis
+            let d = 5.8 * uis
             ctx.move(to: CGPoint(x: cx - d, y: cy + d))
             ctx.addLine(to: CGPoint(x: cx + d, y: cy - d))
             ctx.strokePath()
 
         case .arrow:
-            let d = 6.5 * uis
+            let d = 5.9 * uis
             ctx.move(to: CGPoint(x: cx - d, y: cy + d))
-            ctx.addLine(to: CGPoint(x: cx + 3.6 * uis, y: cy - 3.6 * uis))
+            ctx.addLine(to: CGPoint(x: cx + 3.4 * uis, y: cy - 3.4 * uis))
             ctx.strokePath()
             // Crisp solid triangular arrowhead at top-right
-            let tip = CGPoint(x: cx + d, y: cy - d)
-            let leftWing = CGPoint(x: cx + 1.0 * uis, y: cy - d + 0.4 * uis)
-            let rightWing = CGPoint(x: cx + d - 0.4 * uis, y: cy - 1.0 * uis)
+            let tip = CGPoint(x: cx + 6.0 * uis, y: cy - 6.0 * uis)
+            let leftWing = CGPoint(x: cx + 1.2 * uis, y: cy - 5.6 * uis)
+            let rightWing = CGPoint(x: cx + 5.6 * uis, y: cy - 1.2 * uis)
             ctx.move(to: tip)
             ctx.addLine(to: leftWing)
             ctx.addLine(to: rightWing)
@@ -1128,12 +1524,12 @@ final class OverlayCanvasView: NSView {
             ctx.fillPath()
 
         case .pen:
-            // 45° marker/pencil silhouette matching reference toolbar
-            let pNib = CGPoint(x: cx - 6.8 * uis, y: cy + 6.8 * uis)
-            let pLeft = CGPoint(x: cx - 6.5 * uis, y: cy + 3.4 * uis)
-            let pTopLeft = CGPoint(x: cx + 3.4 * uis, y: cy - 6.5 * uis)
-            let pTopRight = CGPoint(x: cx + 6.5 * uis, y: cy - 3.4 * uis)
-            let pBottom = CGPoint(x: cx - 3.4 * uis, y: cy + 6.5 * uis)
+            // Slender 45° marker/pencil silhouette with crisp 1px stroke
+            let pNib = CGPoint(x: cx - 6.0 * uis, y: cy + 6.0 * uis)
+            let pLeft = CGPoint(x: cx - 5.6 * uis, y: cy + 2.8 * uis)
+            let pTopLeft = CGPoint(x: cx + 3.1 * uis, y: cy - 5.9 * uis)
+            let pTopRight = CGPoint(x: cx + 5.9 * uis, y: cy - 3.1 * uis)
+            let pBottom = CGPoint(x: cx - 2.8 * uis, y: cy + 5.6 * uis)
             ctx.move(to: pNib)
             ctx.addLine(to: pLeft)
             ctx.addLine(to: pTopLeft)
@@ -1143,118 +1539,132 @@ final class OverlayCanvasView: NSView {
             ctx.strokePath()
 
         case .mosaic:
-            // 2×2 checkerboard inside crisp square frame
-            let s = 14.4 * uis
-            let half = s * 0.5
-            let x0 = cx - half
-            let y0 = cy - half
-            ctx.setLineWidth(1.25 * uis)
+            // Pixel-snapped 2×2 checkerboard inside 1px square frame
+            let s = 13.0 * uis
+            let outer = pixelSnapRect(CGRect(x: cx - s * 0.5, y: cy - s * 0.5, width: s, height: s), lineWidth: lw)
+            let xm = (outer.midX * backing).rounded() / backing
+            let ym = (outer.midY * backing).rounded() / backing
             ctx.setLineJoin(.miter)
-            ctx.stroke(CGRect(x: x0, y: y0, width: s, height: s))
-            ctx.fill(CGRect(x: x0, y: y0, width: half, height: half))
-            ctx.fill(CGRect(x: cx, y: cy, width: half, height: half))
+            ctx.stroke(outer)
+            ctx.fill(CGRect(x: outer.minX, y: outer.minY, width: xm - outer.minX, height: ym - outer.minY))
+            ctx.fill(CGRect(x: xm, y: ym, width: outer.maxX - xm, height: outer.maxY - ym))
 
         case .text:
-            let top = CGPoint(x: cx, y: cy - 7.0 * uis)
-            let bl = CGPoint(x: cx - 5.8 * uis, y: cy + 6.8 * uis)
-            let br = CGPoint(x: cx + 5.8 * uis, y: cy + 6.8 * uis)
+            let top = CGPoint(x: cx, y: cy - 6.4 * uis)
+            let bl = CGPoint(x: cx - 5.2 * uis, y: cy + 6.2 * uis)
+            let br = CGPoint(x: cx + 5.2 * uis, y: cy + 6.2 * uis)
             ctx.move(to: bl)
             ctx.addLine(to: top)
             ctx.addLine(to: br)
-            let barY = cy + 2.2 * uis
-            ctx.move(to: CGPoint(x: cx - 3.7 * uis, y: barY))
-            ctx.addLine(to: CGPoint(x: cx + 3.7 * uis, y: barY))
+            let barY = pixelSnap(cy + 1.9 * uis, lineWidth: lw)
+            ctx.move(to: CGPoint(x: cx - 3.3 * uis, y: barY))
+            ctx.addLine(to: CGPoint(x: cx + 3.3 * uis, y: barY))
             ctx.strokePath()
 
         case .number:
-            let s = 16.0 * uis
-            ctx.setLineWidth(1.25 * uis)
+            let s = 14.6 * uis
             ctx.strokeEllipse(in: CGRect(x: cx - s * 0.5, y: cy - s * 0.5, width: s, height: s))
-            let font = NSFont(name: "TimesNewRomanPS-BoldMT", size: 11.2 * uis)
-                ?? NSFont.systemFont(ofSize: 10.8 * uis, weight: .semibold)
+            let font = NSFont(name: "TimesNewRomanPS-BoldMT", size: 10.6 * uis)
+                ?? NSFont.systemFont(ofSize: 10.2 * uis, weight: .semibold)
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
             let str: NSString = "1"
             let sz = str.size(withAttributes: attrs)
             str.draw(at: NSPoint(x: cx - sz.width * 0.5, y: cy - sz.height * 0.5), withAttributes: attrs)
 
         case .spotlight:
-            let outer = 14.4 * uis
-            let inner = 6.4 * uis
-            ctx.setLineWidth(1.3 * uis)
+            let outerS = 13.2 * uis
+            let innerS = 5.8 * uis
+            let outerR = pixelSnapRect(CGRect(x: cx - outerS * 0.5, y: cy - outerS * 0.5, width: outerS, height: outerS), lineWidth: lw)
+            let innerR = pixelSnapRect(CGRect(x: cx - innerS * 0.5, y: cy - innerS * 0.5, width: innerS, height: innerS), lineWidth: lw)
             ctx.setLineJoin(.miter)
-            ctx.stroke(CGRect(x: cx - outer * 0.5, y: cy - outer * 0.5, width: outer, height: outer))
-            ctx.stroke(CGRect(x: cx - inner * 0.5, y: cy - inner * 0.5, width: inner, height: inner))
+            ctx.stroke(outerR)
+            ctx.stroke(innerR)
 
         case .pin:
-            // Symmetric pushpin rotated +45° so head is top-right and needle points bottom-left
+            // Classic curved bell-collar thumbtack rotated +45° with tapered sharp needle
             ctx.translateBy(x: cx, y: cy)
             ctx.rotate(by: .pi / 4.0)
-            let path = CGMutablePath()
-            // Top cap flange
-            path.move(to: CGPoint(x: -3.6 * uis, y: -7.0 * uis))
-            path.addLine(to: CGPoint(x: 3.6 * uis, y: -7.0 * uis))
-            path.addLine(to: CGPoint(x: 3.6 * uis, y: -5.2 * uis))
-            // Waist
-            path.addLine(to: CGPoint(x: 2.1 * uis, y: -4.6 * uis))
-            path.addLine(to: CGPoint(x: 2.5 * uis, y: -0.6 * uis))
-            // Lower collar
-            path.addLine(to: CGPoint(x: 4.8 * uis, y: 1.4 * uis))
-            path.addLine(to: CGPoint(x: -4.8 * uis, y: 1.4 * uis))
-            path.addLine(to: CGPoint(x: -2.5 * uis, y: -0.6 * uis))
-            path.addLine(to: CGPoint(x: -2.1 * uis, y: -4.6 * uis))
-            path.addLine(to: CGPoint(x: -3.6 * uis, y: -5.2 * uis))
-            path.closeSubpath()
-            ctx.addPath(path)
+            let head = CGMutablePath()
+            // Top cap rim
+            head.move(to: CGPoint(x: -3.2 * uis, y: -6.3 * uis))
+            head.addLine(to: CGPoint(x: 3.2 * uis, y: -6.3 * uis))
+            head.addLine(to: CGPoint(x: 3.2 * uis, y: -4.9 * uis))
+            // Concave waist flaring smoothly into bell collar
+            head.addLine(to: CGPoint(x: 1.85 * uis, y: -4.5 * uis))
+            head.addQuadCurve(
+                to: CGPoint(x: 4.35 * uis, y: 0.95 * uis),
+                control: CGPoint(x: 2.15 * uis, y: -1.1 * uis)
+            )
+            head.addLine(to: CGPoint(x: -4.35 * uis, y: 0.95 * uis))
+            head.addQuadCurve(
+                to: CGPoint(x: -1.85 * uis, y: -4.5 * uis),
+                control: CGPoint(x: -2.15 * uis, y: -1.1 * uis)
+            )
+            head.addLine(to: CGPoint(x: -3.2 * uis, y: -4.9 * uis))
+            head.closeSubpath()
+            ctx.addPath(head)
             ctx.fillPath()
-            // Needle
-            ctx.setLineWidth(1.5 * uis)
-            ctx.move(to: CGPoint(x: 0, y: 1.4 * uis))
-            ctx.addLine(to: CGPoint(x: 0, y: 7.4 * uis))
-            ctx.strokePath()
+
+            // Sharp tapered filled needle
+            let needle = CGMutablePath()
+            needle.move(to: CGPoint(x: -0.72 * uis, y: 0.9 * uis))
+            needle.addLine(to: CGPoint(x: 0.72 * uis, y: 0.9 * uis))
+            needle.addLine(to: CGPoint(x: 0, y: 7.1 * uis))
+            needle.closeSubpath()
+            ctx.addPath(needle)
+            ctx.fillPath()
 
         case .undo:
-            let r = 6.2 * uis
-            let aStart = -0.78 * CGFloat.pi
-            let aEnd = 0.72 * CGFloat.pi
-            var first = true
-            var a = aStart
-            while a <= aEnd + 0.001 {
-                let pt = CGPoint(x: cx + r * cos(a), y: cy + r * sin(a))
-                if first {
-                    ctx.move(to: pt)
-                    first = false
-                } else {
-                    ctx.addLine(to: pt)
-                }
-                a += 0.08
-            }
-            ctx.strokePath()
-            // Arrowhead at start of counter-clockwise arc (upper-left pointing down-left)
-            let tip = CGPoint(x: cx + r * cos(aStart), y: cy + r * sin(aStart))
-            ctx.move(to: CGPoint(x: tip.x - 0.5 * uis, y: tip.y - 3.4 * uis))
-            ctx.addLine(to: tip)
-            ctx.addLine(to: CGPoint(x: tip.x + 3.4 * uis, y: tip.y - 0.4 * uis))
+            // Crisp circular arc starting at 9 o'clock curving over top/right/bottom + solid downward triangle at 9 o'clock
+            let r = 5.5 * uis
+            let arcCenterX = cx + 0.5 * uis
+            ctx.addArc(
+                center: CGPoint(x: arcCenterX, y: cy),
+                radius: r,
+                startAngle: -.pi,
+                endAngle: 0.52 * .pi,
+                clockwise: false
+            )
             ctx.strokePath()
 
+            let ax = arcCenterX - r
+            let ay = cy
+            ctx.move(to: CGPoint(x: ax - 2.2 * uis, y: ay - 0.6 * uis))
+            ctx.addLine(to: CGPoint(x: ax + 2.2 * uis, y: ay - 0.6 * uis))
+            ctx.addLine(to: CGPoint(x: ax, y: ay + 2.5 * uis))
+            ctx.closePath()
+            ctx.fillPath()
+
         case .ocr:
-            let bw = 22.0 * uis
-            let bh = 15.0 * uis
-            let badgeRect = CGRect(x: cx - bw * 0.5, y: cy - bh * 0.5, width: bw, height: bh)
-            let bp = CGPath(roundedRect: badgeRect, cornerWidth: 3.8 * uis, cornerHeight: 3.8 * uis, transform: nil)
+            // Compact rounded-rect badge with bold slanted knocked-out "OCR"
+            let bw = 19.6 * uis
+            let bh = 13.0 * uis
+            let rawBadge = CGRect(x: cx - bw * 0.5, y: cy - bh * 0.5, width: bw, height: bh)
+            let badgeRect = CGRect(
+                x: (rawBadge.minX * backing).rounded() / backing,
+                y: (rawBadge.minY * backing).rounded() / backing,
+                width: (rawBadge.width * backing).rounded() / backing,
+                height: (rawBadge.height * backing).rounded() / backing
+            )
+            let bp = CGPath(roundedRect: badgeRect, cornerWidth: 2.5 * uis, cornerHeight: 2.5 * uis, transform: nil)
             ctx.addPath(bp)
             ctx.fillPath()
-            let font = NSFont.systemFont(ofSize: 8.4 * uis, weight: .heavy)
+            let font = NSFont.systemFont(ofSize: 7.5 * uis, weight: .black)
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: knockoutColor,
-                .kern: -0.2 * uis
+                .obliqueness: 0.14,
+                .kern: -0.25 * uis
             ]
             let str: NSString = "OCR"
             let sz = str.size(withAttributes: attrs)
-            str.draw(at: NSPoint(x: cx - sz.width * 0.5, y: cy - sz.height * 0.5), withAttributes: attrs)
+            str.draw(
+                at: NSPoint(x: badgeRect.midX - sz.width * 0.5 - 0.25 * uis, y: badgeRect.midY - sz.height * 0.5),
+                withAttributes: attrs
+            )
 
         case .cancel:
-            let d = 5.8 * uis
+            let d = 5.3 * uis
             ctx.move(to: CGPoint(x: cx - d, y: cy - d))
             ctx.addLine(to: CGPoint(x: cx + d, y: cy + d))
             ctx.move(to: CGPoint(x: cx + d, y: cy - d))
@@ -1262,48 +1672,56 @@ final class OverlayCanvasView: NSView {
             ctx.strokePath()
 
         case .longshot:
-            let bw = 7.8 * uis
-            let bh = 9.4 * uis
-            let box = CGRect(x: cx - bw * 0.5, y: cy - bh * 0.5, width: bw, height: bh)
-            ctx.setLineWidth(1.25 * uis)
-            ctx.addPath(CGPath(roundedRect: box, cornerWidth: 1.5 * uis, cornerHeight: 1.5 * uis, transform: nil))
+            let bw = 6.8 * uis
+            let bh = 8.2 * uis
+            let box = pixelSnapRect(CGRect(x: cx - bw * 0.5, y: cy - bh * 0.5, width: bw, height: bh), lineWidth: lw)
+            ctx.addPath(CGPath(roundedRect: box, cornerWidth: 1.0 * uis, cornerHeight: 1.0 * uis, transform: nil))
             ctx.strokePath()
-            // Top chevron ^
-            ctx.move(to: CGPoint(x: cx - 3.0 * uis, y: cy - 6.6 * uis))
-            ctx.addLine(to: CGPoint(x: cx, y: cy - 9.0 * uis))
-            ctx.addLine(to: CGPoint(x: cx + 3.0 * uis, y: cy - 6.6 * uis))
-            // Bottom chevron v
-            ctx.move(to: CGPoint(x: cx - 3.0 * uis, y: cy + 6.6 * uis))
-            ctx.addLine(to: CGPoint(x: cx, y: cy + 9.0 * uis))
-            ctx.addLine(to: CGPoint(x: cx + 3.0 * uis, y: cy + 6.6 * uis))
+            // Flatter, wider top & bottom chevrons
+            ctx.move(to: CGPoint(x: cx - 2.7 * uis, y: cy - 6.0 * uis))
+            ctx.addLine(to: CGPoint(x: cx, y: cy - 8.0 * uis))
+            ctx.addLine(to: CGPoint(x: cx + 2.7 * uis, y: cy - 6.0 * uis))
+            ctx.move(to: CGPoint(x: cx - 2.7 * uis, y: cy + 6.0 * uis))
+            ctx.addLine(to: CGPoint(x: cx, y: cy + 8.0 * uis))
+            ctx.addLine(to: CGPoint(x: cx + 2.7 * uis, y: cy + 6.0 * uis))
             ctx.strokePath()
 
         case .save:
-            // Tray [ _ ]
-            ctx.move(to: CGPoint(x: cx - 6.8 * uis, y: cy + 3.0 * uis))
-            ctx.addLine(to: CGPoint(x: cx - 6.8 * uis, y: cy + 6.8 * uis))
-            ctx.addLine(to: CGPoint(x: cx + 6.8 * uis, y: cy + 6.8 * uis))
-            ctx.addLine(to: CGPoint(x: cx + 6.8 * uis, y: cy + 3.0 * uis))
-            // Vertical arrow stem
-            ctx.move(to: CGPoint(x: cx, y: cy - 7.0 * uis))
-            ctx.addLine(to: CGPoint(x: cx, y: cy + 1.8 * uis))
+            // Shallow pixel-snapped tray [ _ ]
+            let xL = pixelSnap(cx - 6.2 * uis, lineWidth: lw)
+            let xR = pixelSnap(cx + 6.2 * uis, lineWidth: lw)
+            let yBot = pixelSnap(cy + 6.0 * uis, lineWidth: lw)
+            let yLip = pixelSnap(cy + 3.4 * uis, lineWidth: lw)
+            let xMid = pixelSnap(cx, lineWidth: lw)
+            ctx.setLineJoin(.miter)
+            ctx.move(to: CGPoint(x: xL, y: yLip))
+            ctx.addLine(to: CGPoint(x: xL, y: yBot))
+            ctx.addLine(to: CGPoint(x: xR, y: yBot))
+            ctx.addLine(to: CGPoint(x: xR, y: yLip))
             ctx.strokePath()
-            // Solid downward arrowhead
-            ctx.move(to: CGPoint(x: cx - 3.4 * uis, y: cy + 0.6 * uis))
-            ctx.addLine(to: CGPoint(x: cx + 3.4 * uis, y: cy + 0.6 * uis))
-            ctx.addLine(to: CGPoint(x: cx, y: cy + 4.5 * uis))
+
+            // Vertical arrow stem + compact solid triangle head
+            ctx.setLineJoin(.round)
+            ctx.move(to: CGPoint(x: xMid, y: cy - 6.2 * uis))
+            ctx.addLine(to: CGPoint(x: xMid, y: cy + 1.4 * uis))
+            ctx.strokePath()
+
+            ctx.move(to: CGPoint(x: xMid - 2.9 * uis, y: cy + 0.5 * uis))
+            ctx.addLine(to: CGPoint(x: xMid + 2.9 * uis, y: cy + 0.5 * uis))
+            ctx.addLine(to: CGPoint(x: xMid, y: cy + 3.9 * uis))
             ctx.closePath()
             ctx.fillPath()
 
         case .copy:
-            ctx.setLineWidth(1.55 * uis)
-            ctx.move(to: CGPoint(x: cx - 6.8 * uis, y: cy + 0.8 * uis))
-            ctx.addLine(to: CGPoint(x: cx - 1.8 * uis, y: cy + 6.0 * uis))
-            ctx.addLine(to: CGPoint(x: cx + 7.0 * uis, y: cy - 5.4 * uis))
+            let checkLW = max(1.0, (1.15 * uis * backing).rounded()) / backing
+            ctx.setLineWidth(checkLW)
+            ctx.move(to: CGPoint(x: cx - 6.0 * uis, y: cy + 0.6 * uis))
+            ctx.addLine(to: CGPoint(x: cx - 1.8 * uis, y: cy + 5.2 * uis))
+            ctx.addLine(to: CGPoint(x: cx + 6.4 * uis, y: cy - 5.0 * uis))
             ctx.strokePath()
 
         case .highlight:
-            drawSymbol("highlighter", in: rect, pointSize: 13.5 * uis, color: color)
+            drawSymbol("highlighter", in: rect, pointSize: 13.0 * uis, color: color)
         }
 
         ctx.restoreGState()
@@ -1318,18 +1736,17 @@ final class OverlayCanvasView: NSView {
         in ctx: CGContext,
         mode: StyleSubBarMode,
         mainBar: CGRect,
+        anchorX: CGFloat?,
         height: CGFloat,
         uis: CGFloat,
         dark: Bool,
-        barBg: CGColor,
-        barBorder: CGColor,
         textColor: NSColor,
         cfg: AirSnipConfig
     ) {
         let vis = cfg.toolbar
         let visibleSwatchIndices = (0..<ColorPalette.swatchCount).filter { vis.isVisible(.color($0)) }
-        let swatchSlot: CGFloat = 24 * uis
-        let swatchGap: CGFloat = 3 * uis
+        let swatchSlot: CGFloat = 23 * uis
+        let swatchGap: CGFloat = 2.5 * uis
         let swatchesW: CGFloat = visibleSwatchIndices.isEmpty
             ? 0
             : (CGFloat(visibleSwatchIndices.count) * swatchSlot + CGFloat(visibleSwatchIndices.count - 1) * swatchGap)
@@ -1339,37 +1756,57 @@ final class OverlayCanvasView: NSView {
         case .none:
             return
         case .blur:
-            rowW = 108 * uis
+            rowW = (106 * uis).rounded()
         case .stroke(let showFill):
-            let leftW: CGFloat = (3 * 24 + 2 * 3 + (showFill ? 30 : 0)) * uis
-            rowW = 14 * uis + leftW + (swatchesW > 0 ? (12 * uis + swatchesW) : 0)
+            let leftW: CGFloat = (3 * 24 + 2 * 3 + (showFill ? 29 : 0)) * uis
+            rowW = (14 * uis + leftW + (swatchesW > 0 ? (13 * uis + swatchesW) : 0)).rounded()
         case .text:
-            let textControlsW: CGFloat = 278 * uis
-            rowW = textControlsW + (swatchesW > 0 ? (12 * uis + swatchesW + 6 * uis) : 0)
+            let textControlsW: CGFloat = 270 * uis
+            rowW = (textControlsW + (swatchesW > 0 ? (12 * uis + swatchesW + 6 * uis) : 0)).rounded()
         }
 
-        let rowX = max(8, min(bounds.width - rowW - 8, mainBar.minX))
-        let rowY = (mainBar.maxY + height + 5 <= bounds.height - 6)
-            ? (mainBar.maxY + 5)
-            : (mainBar.minY - height - 5)
+        let targetCenter = anchorX ?? (mainBar.minX + min(mainBar.width * 0.5, rowW * 0.5))
+        var rowX = (targetCenter - rowW * 0.5).rounded()
+        // Keep sub-bar comfortably within horizontal bounds and visually connected to mainBar
+        let minConnectedX = max(8, mainBar.minX - 24 * uis)
+        let maxConnectedX = min(bounds.width - rowW - 8, max(minConnectedX, mainBar.maxX - rowW + 24 * uis))
+        rowX = max(minConnectedX, min(maxConnectedX, rowX))
+        rowX = max(8, min(bounds.width - rowW - 8, rowX))
+
+        let calloutGap: CGFloat = 7 * uis
+        let placedBelow = (mainBar.maxY + height + calloutGap <= bounds.height - 6)
+        let rowY = (placedBelow ? (mainBar.maxY + calloutGap) : (mainBar.minY - height - calloutGap)).rounded()
         let rect = CGRect(x: rowX, y: rowY, width: rowW, height: height)
         secondRowRect = rect
 
-        ctx.saveGState()
-        ctx.setShadow(offset: CGSize(width: 0, height: 2), blur: 8, color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.20))
-        let path = CGPath(roundedRect: rect, cornerWidth: 7.5 * uis, cornerHeight: 7.5 * uis, transform: nil)
-        ctx.addPath(path)
-        ctx.setFillColor(barBg)
-        ctx.fillPath()
-        ctx.restoreGState()
+        let bubblePath = makeCalloutBubblePath(
+            rect: rect,
+            cornerRadius: 6.5 * uis,
+            arrowX: anchorX,
+            arrowOnTop: placedBelow,
+            arrowWidth: 10.5 * uis,
+            arrowHeight: 5.0 * uis
+        )
+        drawFrostedMaterial(
+            in: ctx,
+            path: bubblePath,
+            sampleRect: rect,
+            dark: dark,
+            shadowOffsetY: 3.0,
+            shadowBlur: 12,
+            shadowAlpha: dark ? 0.32 : 0.18
+        )
 
-        ctx.addPath(path)
-        ctx.setStrokeColor(barBorder)
-        ctx.setLineWidth(1)
-        ctx.strokePath()
-
-        let activeBg = CGColor(srgbRed: 0.12, green: 0.53, blue: 0.94, alpha: 0.22)
-        let activeDot = CGColor(srgbRed: 0.14, green: 0.56, blue: 0.98, alpha: 1)
+        let dividerColor = dark
+            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.13)
+            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.10)
+        let hoverCircle = dark
+            ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.09)
+            : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.06)
+        let activeHalo = dark
+            ? CGColor(srgbRed: 0.12, green: 0.56, blue: 1.0, alpha: 0.24)
+            : CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.15)
+        let activeDot = CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 1.0)
         var curX = rect.minX + 7 * uis
 
         switch mode {
@@ -1377,25 +1814,26 @@ final class OverlayCanvasView: NSView {
             break
 
         case .blur:
-            let presets: [(Double, CGFloat, String)] = [(8, 3.0, "细颗粒"), (16, 4.6, "标准"), (28, 6.4, "强模糊")]
+            let presets: [(Double, CGFloat, String)] = [(8, 2.6, "细颗粒"), (16, 4.1, "标准"), (28, 5.7, "强模糊")]
             let activeBlur: Double = {
                 if let obj = document.selectedObject, case .blur(_, _, let br, _) = obj.kind { return br }
                 return currentBlurRadius
             }()
             for (idx, preset) in presets.enumerated() {
+                let itemID = "blur.preset.\(idx)"
                 let bRect = CGRect(x: curX, y: rect.minY + 4 * uis, width: 28 * uis, height: height - 8 * uis)
                 let isSel = abs(activeBlur - preset.0) < 3.5
-                if isSel {
-                    ctx.addPath(CGPath(roundedRect: bRect, cornerWidth: 5 * uis, cornerHeight: 5 * uis, transform: nil))
-                    ctx.setFillColor(activeBg)
-                    ctx.fillPath()
+                if isSel || hoveredItemID == itemID {
+                    let hr: CGFloat = 10.0 * uis
+                    ctx.setFillColor(isSel ? activeHalo : hoverCircle)
+                    ctx.fillEllipse(in: CGRect(x: bRect.midX - hr, y: bRect.midY - hr, width: hr * 2, height: hr * 2))
                 }
                 let r = preset.1 * uis
                 ctx.setFillColor(isSel ? activeDot : textColor.cgColor)
                 ctx.fillEllipse(in: CGRect(x: bRect.midX - r, y: bRect.midY - r, width: r * 2, height: r * 2))
                 let val = preset.0
                 toolbarHitItems.append(ToolbarHitItem(
-                    id: "blur.preset.\(idx)",
+                    id: itemID,
                     rect: bRect,
                     tooltip: preset.2,
                     action: { [weak self] in self?.selectBlurRadiusPreset(val) },
@@ -1405,22 +1843,23 @@ final class OverlayCanvasView: NSView {
             }
 
         case .stroke(let showFill):
-            let presets: [(Double, CGFloat, String)] = [(2, 2.2, "细线"), (4, 3.8, "中线"), (8, 5.6, "粗线")]
+            let presets: [(Double, CGFloat, String)] = [(2, 2.0, "细线"), (4, 3.4, "中线"), (8, 5.0, "粗线")]
             let activeWidth: Double = document.selectedObject?.style.lineWidth ?? currentLineWidth
             for (idx, preset) in presets.enumerated() {
+                let itemID = "stroke.preset.\(idx)"
                 let bRect = CGRect(x: curX, y: rect.minY + 4 * uis, width: 24 * uis, height: height - 8 * uis)
                 let isSel = abs(activeWidth - preset.0) < 1.2
-                if isSel {
-                    ctx.addPath(CGPath(roundedRect: bRect, cornerWidth: 5 * uis, cornerHeight: 5 * uis, transform: nil))
-                    ctx.setFillColor(activeBg)
-                    ctx.fillPath()
+                if isSel || hoveredItemID == itemID {
+                    let hr: CGFloat = 9.5 * uis
+                    ctx.setFillColor(isSel ? activeHalo : hoverCircle)
+                    ctx.fillEllipse(in: CGRect(x: bRect.midX - hr, y: bRect.midY - hr, width: hr * 2, height: hr * 2))
                 }
                 let r = preset.1 * uis
                 ctx.setFillColor(isSel ? activeDot : textColor.cgColor)
                 ctx.fillEllipse(in: CGRect(x: bRect.midX - r, y: bRect.midY - r, width: r * 2, height: r * 2))
                 let val = preset.0
                 toolbarHitItems.append(ToolbarHitItem(
-                    id: "stroke.preset.\(idx)",
+                    id: itemID,
                     rect: bRect,
                     tooltip: preset.2,
                     action: { [weak self] in self?.selectLineWidthPreset(val) },
@@ -1439,17 +1878,36 @@ final class OverlayCanvasView: NSView {
                     }
                     return fillEnabled
                 }()
-                let fRect = CGRect(x: curX + 2 * uis, y: rect.minY + 4 * uis, width: 25 * uis, height: height - 8 * uis)
-                if isFilledNow {
+                let fRect = CGRect(x: curX + 2 * uis, y: rect.minY + 4 * uis, width: 24 * uis, height: height - 8 * uis)
+                if isFilledNow || hoveredItemID == "edit.fill" {
                     ctx.addPath(CGPath(roundedRect: fRect, cornerWidth: 5 * uis, cornerHeight: 5 * uis, transform: nil))
-                    ctx.setFillColor(activeBg)
+                    ctx.setFillColor(isFilledNow ? activeHalo : hoverCircle)
                     ctx.fillPath()
                 }
-                drawSymbol(isFilledNow ? "square.fill" : "square.dotted", in: fRect, pointSize: 12 * uis, color: textColor)
+                // Crisp custom 1px fill-toggle glyph
+                let chipSide = 11.4 * uis
+                let chipRect = pixelSnapRect(
+                    CGRect(x: fRect.midX - chipSide * 0.5, y: fRect.midY - chipSide * 0.5, width: chipSide, height: chipSide),
+                    lineWidth: 1.0
+                )
+                let chipPath = CGPath(roundedRect: chipRect, cornerWidth: 2.0 * uis, cornerHeight: 2.0 * uis, transform: nil)
+                if isFilledNow {
+                    ctx.addPath(chipPath)
+                    ctx.setFillColor(activeDot)
+                    ctx.fillPath()
+                } else {
+                    ctx.saveGState()
+                    ctx.addPath(chipPath)
+                    ctx.setStrokeColor(textColor.cgColor)
+                    ctx.setLineWidth(1.0)
+                    ctx.setLineDash(phase: 0, lengths: [2.2 * uis, 1.8 * uis])
+                    ctx.strokePath()
+                    ctx.restoreGState()
+                }
                 toolbarHitItems.append(ToolbarHitItem(
                     id: "edit.fill",
                     rect: fRect,
-                    tooltip: "填充开关",
+                    tooltip: isFilledNow ? "实心填充（已开启）" : "实心填充（点击开启）",
                     action: { [weak self] in self?.toggleFill() },
                     doubleClickAction: nil
                 ))
@@ -1457,28 +1915,64 @@ final class OverlayCanvasView: NSView {
             }
 
             if !visibleSwatchIndices.isEmpty {
-                let sepX = curX + 4 * uis
-                ctx.setStrokeColor(barBorder)
-                ctx.setLineWidth(1)
+                let sepX = pixelSnap(curX + 4 * uis, lineWidth: 1.0)
+                ctx.setStrokeColor(dividerColor)
+                ctx.setLineWidth(1.0)
                 ctx.move(to: CGPoint(x: sepX, y: rect.minY + 7 * uis))
                 ctx.addLine(to: CGPoint(x: sepX, y: rect.maxY - 7 * uis))
                 ctx.strokePath()
                 curX = sepX + 6 * uis
-                drawInlineSwatches(in: ctx, indices: visibleSwatchIndices, startX: curX, rowRect: rect, slotSide: swatchSlot, gap: swatchGap, uis: uis, cfg: cfg)
+                drawInlineSwatches(
+                    in: ctx,
+                    indices: visibleSwatchIndices,
+                    startX: curX,
+                    rowRect: rect,
+                    slotSide: swatchSlot,
+                    gap: swatchGap,
+                    uis: uis,
+                    dark: dark,
+                    cfg: cfg
+                )
             }
 
         case .text:
             let effectiveState = currentEffectiveTextAttributes
-            let fontBtnRect = CGRect(x: rect.minX + 6 * uis, y: rect.minY + 3 * uis, width: 112 * uis, height: height - 6 * uis)
+            let capsuleFill = dark
+                ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.07)
+                : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.045)
+            let capsuleBorder = dark
+                ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.12)
+                : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.09)
+
+            // 1. Font family selector capsule
+            let fontBtnRect = CGRect(x: rect.minX + 6 * uis, y: rect.minY + 4 * uis, width: 112 * uis, height: height - 8 * uis)
             let fp = CGPath(roundedRect: fontBtnRect, cornerWidth: 5 * uis, cornerHeight: 5 * uis, transform: nil)
             ctx.addPath(fp)
-            ctx.setFillColor(dark ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.07) : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.05))
+            ctx.setFillColor(hoveredItemID == "text.family" ? hoverCircle : capsuleFill)
             ctx.fillPath()
+            ctx.addPath(fp)
+            ctx.setStrokeColor(capsuleBorder)
+            ctx.setLineWidth(0.75)
+            ctx.strokePath()
 
-            let labelFont = NSFont.systemFont(ofSize: 11.5 * uis, weight: .medium)
+            let labelFont = NSFont.systemFont(ofSize: 11.0 * uis, weight: .medium)
             let attrs: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: textColor]
-            let shortFam = effectiveState.family.count > 11 ? String(effectiveState.family.prefix(11)) + "…" : effectiveState.family
-            ("\(shortFam) ▾" as NSString).draw(at: NSPoint(x: fontBtnRect.minX + 7 * uis, y: fontBtnRect.minY + 4 * uis), withAttributes: attrs)
+            let shortFam = effectiveState.family.count > 13 ? String(effectiveState.family.prefix(12)) + "…" : effectiveState.family
+            let famSz = (shortFam as NSString).size(withAttributes: attrs)
+            (shortFam as NSString).draw(
+                at: NSPoint(x: fontBtnRect.minX + 7 * uis, y: fontBtnRect.midY - famSz.height * 0.5),
+                withAttributes: attrs
+            )
+            // Crisp vector downward chevron
+            let chevX = fontBtnRect.maxX - 9 * uis
+            let chevY = fontBtnRect.midY
+            ctx.setStrokeColor(textColor.withAlphaComponent(0.7).cgColor)
+            ctx.setLineWidth(1.1 * uis)
+            ctx.move(to: CGPoint(x: chevX - 2.6 * uis, y: chevY - 1.2 * uis))
+            ctx.addLine(to: CGPoint(x: chevX, y: chevY + 1.6 * uis))
+            ctx.addLine(to: CGPoint(x: chevX + 2.6 * uis, y: chevY - 1.2 * uis))
+            ctx.strokePath()
+
             toolbarHitItems.append(ToolbarHitItem(
                 id: "text.family",
                 rect: fontBtnRect,
@@ -1487,40 +1981,67 @@ final class OverlayCanvasView: NSView {
                 doubleClickAction: nil
             ))
 
-            let bRect = CGRect(x: fontBtnRect.maxX + 5 * uis, y: rect.minY + 3 * uis, width: 25 * uis, height: height - 6 * uis)
-            if effectiveState.bold {
-                ctx.setFillColor(activeBg)
+            // 2. Bold & Italic toggles
+            let bRect = CGRect(x: fontBtnRect.maxX + 4 * uis, y: rect.minY + 4 * uis, width: 24 * uis, height: height - 8 * uis)
+            if effectiveState.bold || hoveredItemID == "text.bold" {
+                ctx.setFillColor(effectiveState.bold ? activeHalo : hoverCircle)
                 ctx.addPath(CGPath(roundedRect: bRect, cornerWidth: 5 * uis, cornerHeight: 5 * uis, transform: nil))
                 ctx.fillPath()
             }
-            drawSymbol("bold", in: bRect, pointSize: 11.5 * uis, color: textColor)
+            drawSymbol("bold", in: bRect, pointSize: 11.0 * uis, color: effectiveState.bold ? NSColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 1) : textColor)
             toolbarHitItems.append(ToolbarHitItem(id: "text.bold", rect: bRect, tooltip: "粗体", action: { [weak self] in self?.toggleBold() }, doubleClickAction: nil))
 
-            let iRect = CGRect(x: bRect.maxX + 3 * uis, y: rect.minY + 3 * uis, width: 25 * uis, height: height - 6 * uis)
-            if effectiveState.italic {
-                ctx.setFillColor(activeBg)
+            let iRect = CGRect(x: bRect.maxX + 2 * uis, y: rect.minY + 4 * uis, width: 24 * uis, height: height - 8 * uis)
+            if effectiveState.italic || hoveredItemID == "text.italic" {
+                ctx.setFillColor(effectiveState.italic ? activeHalo : hoverCircle)
                 ctx.addPath(CGPath(roundedRect: iRect, cornerWidth: 5 * uis, cornerHeight: 5 * uis, transform: nil))
                 ctx.fillPath()
             }
-            drawSymbol("italic", in: iRect, pointSize: 11.5 * uis, color: textColor)
+            drawSymbol("italic", in: iRect, pointSize: 11.0 * uis, color: effectiveState.italic ? NSColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 1) : textColor)
             toolbarHitItems.append(ToolbarHitItem(id: "text.italic", rect: iRect, tooltip: "斜体", action: { [weak self] in self?.toggleItalic() }, doubleClickAction: nil))
 
-            let minusRect = CGRect(x: iRect.maxX + 6 * uis, y: rect.minY + 3 * uis, width: 22 * uis, height: height - 6 * uis)
-            drawSymbol("minus", in: minusRect, pointSize: 10.5 * uis, color: textColor)
+            // 3. Unified `- 24 +` stepper capsule
+            let stepperRect = CGRect(x: iRect.maxX + 5 * uis, y: rect.minY + 4 * uis, width: 76 * uis, height: height - 8 * uis)
+            let spPath = CGPath(roundedRect: stepperRect, cornerWidth: 5 * uis, cornerHeight: 5 * uis, transform: nil)
+            ctx.addPath(spPath)
+            ctx.setFillColor(capsuleFill)
+            ctx.fillPath()
+            ctx.addPath(spPath)
+            ctx.setStrokeColor(capsuleBorder)
+            ctx.setLineWidth(0.75)
+            ctx.strokePath()
+
+            let minusRect = CGRect(x: stepperRect.minX, y: stepperRect.minY, width: 22 * uis, height: stepperRect.height)
+            let plusRect = CGRect(x: stepperRect.maxX - 22 * uis, y: stepperRect.minY, width: 22 * uis, height: stepperRect.height)
+            let midRect = CGRect(x: minusRect.maxX, y: stepperRect.minY, width: stepperRect.width - 44 * uis, height: stepperRect.height)
+
+            // Crisp vector minus / plus
+            ctx.setStrokeColor(textColor.cgColor)
+            ctx.setLineWidth(1.15 * uis)
+            ctx.move(to: CGPoint(x: minusRect.midX - 3.6 * uis, y: minusRect.midY))
+            ctx.addLine(to: CGPoint(x: minusRect.midX + 3.6 * uis, y: minusRect.midY))
+            ctx.move(to: CGPoint(x: plusRect.midX - 3.6 * uis, y: plusRect.midY))
+            ctx.addLine(to: CGPoint(x: plusRect.midX + 3.6 * uis, y: plusRect.midY))
+            ctx.move(to: CGPoint(x: plusRect.midX, y: plusRect.midY - 3.6 * uis))
+            ctx.addLine(to: CGPoint(x: plusRect.midX, y: plusRect.midY + 3.6 * uis))
+            ctx.strokePath()
+
+            let numFont = NSFont.monospacedDigitSystemFont(ofSize: 11.0 * uis, weight: .medium)
+            let numAttrs: [NSAttributedString.Key: Any] = [.font: numFont, .foregroundColor: textColor]
+            let sizeStr = "\(Int(effectiveState.size.rounded()))"
+            let numSz = (sizeStr as NSString).size(withAttributes: numAttrs)
+            (sizeStr as NSString).draw(
+                at: NSPoint(x: midRect.midX - numSz.width * 0.5, y: midRect.midY - numSz.height * 0.5),
+                withAttributes: numAttrs
+            )
+
             toolbarHitItems.append(ToolbarHitItem(id: "text.size.down", rect: minusRect, tooltip: "减小字号", action: { [weak self] in self?.stepFontSize(-2) }, doubleClickAction: nil))
-
-            let sizeStr = "\(Int(effectiveState.size.rounded()))px"
-            let szRect = CGRect(x: minusRect.maxX + 1 * uis, y: rect.minY + 6 * uis, width: 38 * uis, height: height - 10 * uis)
-            (sizeStr as NSString).draw(at: NSPoint(x: szRect.minX + 3 * uis, y: szRect.minY), withAttributes: attrs)
-
-            let plusRect = CGRect(x: szRect.maxX + 1 * uis, y: rect.minY + 3 * uis, width: 22 * uis, height: height - 6 * uis)
-            drawSymbol("plus", in: plusRect, pointSize: 10.5 * uis, color: textColor)
             toolbarHitItems.append(ToolbarHitItem(id: "text.size.up", rect: plusRect, tooltip: "增大字号", action: { [weak self] in self?.stepFontSize(2) }, doubleClickAction: nil))
 
             if !visibleSwatchIndices.isEmpty {
-                let sepX = plusRect.maxX + 6 * uis
-                ctx.setStrokeColor(barBorder)
-                ctx.setLineWidth(1)
+                let sepX = pixelSnap(stepperRect.maxX + 6 * uis, lineWidth: 1.0)
+                ctx.setStrokeColor(dividerColor)
+                ctx.setLineWidth(1.0)
                 ctx.move(to: CGPoint(x: sepX, y: rect.minY + 7 * uis))
                 ctx.addLine(to: CGPoint(x: sepX, y: rect.maxY - 7 * uis))
                 ctx.strokePath()
@@ -1532,6 +2053,7 @@ final class OverlayCanvasView: NSView {
                     slotSide: swatchSlot,
                     gap: swatchGap,
                     uis: uis,
+                    dark: dark,
                     cfg: cfg
                 )
             }
@@ -1546,13 +2068,17 @@ final class OverlayCanvasView: NSView {
         slotSide: CGFloat,
         gap: CGFloat,
         uis: CGFloat,
+        dark: Bool,
         cfg: AirSnipConfig
     ) {
         var sx = startX
         let slotY = rowRect.midY - slotSide * 0.5
-        let swSide = 16 * uis
         for idx in indices {
+            let itemID = "swatch.\(idx)"
             let itemRect = CGRect(x: sx, y: slotY, width: slotSide, height: slotSide)
+            let isHovered = (hoveredItemID == itemID)
+            let isActive = (activeColorIndex == idx)
+            let swSide = (isHovered ? 16.6 : 15.2) * uis
             let swRect = CGRect(
                 x: itemRect.midX - swSide * 0.5,
                 y: itemRect.midY - swSide * 0.5,
@@ -1560,25 +2086,53 @@ final class OverlayCanvasView: NSView {
                 height: swSide
             )
             let col = cfg.swatchColors[idx]
-            if activeColorIndex == idx {
-                let ring = swRect.insetBy(dx: -2.6 * uis, dy: -2.6 * uis)
-                let rp = CGPath(roundedRect: ring, cornerWidth: 5 * uis, cornerHeight: 5 * uis, transform: nil)
-                ctx.addPath(rp)
-                ctx.setStrokeColor(CGColor(srgbRed: 0.16, green: 0.56, blue: 0.98, alpha: 1))
-                ctx.setLineWidth(1.6)
-                ctx.strokePath()
-            }
-            let sp = CGPath(roundedRect: swRect, cornerWidth: 3.8 * uis, cornerHeight: 3.8 * uis, transform: nil)
-            ctx.addPath(sp)
+
+            // Circular color dot
+            ctx.saveGState()
+            ctx.setShadow(
+                offset: CGSize(width: 0, height: 1),
+                blur: 2.0,
+                color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.16)
+            )
             ctx.setFillColor(col.cgColor)
-            ctx.fillPath()
-            ctx.addPath(sp)
-            ctx.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.24))
-            ctx.setLineWidth(1)
-            ctx.strokePath()
+            ctx.fillEllipse(in: swRect)
+            ctx.restoreGState()
+
+            // Crisp perimeter hairline so pure white / black swatches never vanish into glass
+            let lum = (0.299 * Double(col.r) + 0.587 * Double(col.g) + 0.114 * Double(col.b)) / 255.0
+            let rimColor = (dark && lum < 0.22)
+                ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.28)
+                : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.18)
+            ctx.setStrokeColor(rimColor)
+            ctx.setLineWidth(0.8)
+            ctx.strokeEllipse(in: swRect)
+
+            if isActive {
+                let ring = swRect.insetBy(dx: -2.4 * uis, dy: -2.4 * uis)
+                ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.95))
+                ctx.setLineWidth(1.4 * uis)
+                ctx.strokeEllipse(in: ring)
+
+                // Contrast-aware inner checkmark ✓
+                let checkColor = lum > 0.68
+                    ? CGColor(srgbRed: 0.10, green: 0.12, blue: 0.15, alpha: 0.92)
+                    : CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.96)
+                ctx.saveGState()
+                ctx.setStrokeColor(checkColor)
+                ctx.setLineWidth(1.35 * uis)
+                ctx.setLineCap(.round)
+                ctx.setLineJoin(.round)
+                let cx = swRect.midX
+                let cy = swRect.midY
+                ctx.move(to: CGPoint(x: cx - 3.3 * uis, y: cy + 0.2 * uis))
+                ctx.addLine(to: CGPoint(x: cx - 0.8 * uis, y: cy + 2.7 * uis))
+                ctx.addLine(to: CGPoint(x: cx + 3.6 * uis, y: cy - 2.4 * uis))
+                ctx.strokePath()
+                ctx.restoreGState()
+            }
 
             toolbarHitItems.append(ToolbarHitItem(
-                id: "swatch.\(idx)",
+                id: itemID,
                 rect: itemRect,
                 tooltip: "单击选色 · 双击自定义取色",
                 action: { [weak self] in self?.selectColorSwatch(idx) },
@@ -1590,81 +2144,163 @@ final class OverlayCanvasView: NSView {
 
     private func drawColorPickerPopover(in ctx: CGContext) {
         guard var picker = colorPicker else { return }
-        let pw: CGFloat = 212
-        let ph: CGFloat = 192
+        let pw: CGFloat = 216
+        let ph: CGFloat = 210
         let anchorBar = (secondRowRect != .zero) ? secondRowRect : mainToolbarRect
         let swatchItem = toolbarHitItems.first(where: { $0.id == "swatch.\(picker.swatchIndex)" })?.rect ?? anchorBar
-        var px = swatchItem.midX - pw * 0.5
+        var px = (swatchItem.midX - pw * 0.5).rounded()
         px = max(8, min(bounds.width - pw - 8, px))
+
         let stackBottom = max(mainToolbarRect.maxY, secondRowRect.maxY)
         let stackTop = (secondRowRect != .zero) ? min(mainToolbarRect.minY, secondRowRect.minY) : mainToolbarRect.minY
-        var py = stackBottom + 6
+        let calloutGap: CGFloat = 8
+        var placedBelow = true
+        var py = (stackBottom + calloutGap).rounded()
         if py + ph > bounds.height - 8 {
-            py = max(8, stackTop - ph - 6)
+            py = max(8, (stackTop - ph - calloutGap).rounded())
+            placedBelow = false
         }
 
         let panelRect = CGRect(x: px, y: py, width: pw, height: ph)
         picker.panelRect = panelRect
 
         let dark = isDarkTheme
+        let bubblePath = makeCalloutBubblePath(
+            rect: panelRect,
+            cornerRadius: 10.0,
+            arrowX: swatchItem.midX,
+            arrowOnTop: placedBelow,
+            arrowWidth: 12.0,
+            arrowHeight: 5.5
+        )
+        drawFrostedMaterial(
+            in: ctx,
+            path: bubblePath,
+            sampleRect: panelRect,
+            dark: dark,
+            shadowOffsetY: 5,
+            shadowBlur: 18,
+            shadowAlpha: dark ? 0.38 : 0.24
+        )
+
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let pureHue = ColorPalette.hsvToRGB(h: picker.hue, s: 1.0, v: 1.0)
+        let liveColor = ColorPalette.hsvToRGB(h: picker.hue, s: picker.sat, v: picker.val)
+
+        // 1. Smooth continuous 2D Saturation-Value gradient square
+        let svRect = CGRect(x: panelRect.minX + 12, y: panelRect.minY + 12, width: pw - 24, height: 100)
+        picker.svRect = svRect
+        let svClip = CGPath(roundedRect: svRect, cornerWidth: 6.5, cornerHeight: 6.5, transform: nil)
+
         ctx.saveGState()
-        ctx.setShadow(offset: CGSize(width: 0, height: 4), blur: 14, color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.34))
-        let bgPath = CGPath(roundedRect: panelRect, cornerWidth: 10, cornerHeight: 10, transform: nil)
-        ctx.addPath(bgPath)
-        ctx.setFillColor(dark ? CGColor(srgbRed: 0.15, green: 0.16, blue: 0.19, alpha: 0.98) : CGColor(srgbRed: 0.98, green: 0.98, blue: 0.99, alpha: 0.98))
-        ctx.fillPath()
+        ctx.addPath(svClip)
+        ctx.clip()
+        if let satGrad = CGGradient(
+            colorsSpace: colorSpace,
+            colors: [CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1), pureHue.cgColor] as CFArray,
+            locations: [0.0, 1.0]
+        ) {
+            ctx.drawLinearGradient(
+                satGrad,
+                start: CGPoint(x: svRect.minX, y: svRect.midY),
+                end: CGPoint(x: svRect.maxX, y: svRect.midY),
+                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+            )
+        }
+        if let valGrad = CGGradient(
+            colorsSpace: colorSpace,
+            colors: [CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0), CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)] as CFArray,
+            locations: [0.0, 1.0]
+        ) {
+            ctx.drawLinearGradient(
+                valGrad,
+                start: CGPoint(x: svRect.midX, y: svRect.minY),
+                end: CGPoint(x: svRect.midX, y: svRect.maxY),
+                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+            )
+        }
         ctx.restoreGState()
 
-        ctx.addPath(bgPath)
+        ctx.addPath(svClip)
         ctx.setStrokeColor(dark ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.16) : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.14))
-        ctx.setLineWidth(1)
+        ctx.setLineWidth(0.8)
         ctx.strokePath()
 
-        // 1. Saturation-Value 2D square
-        let svRect = CGRect(x: panelRect.minX + 12, y: panelRect.minY + 12, width: pw - 24, height: 96)
-        picker.svRect = svRect
-        let cols = 32
-        let rows = 18
-        let cw = svRect.width / CGFloat(cols)
-        let ch = svRect.height / CGFloat(rows)
-        for ry in 0..<rows {
-            let v = 1.0 - Double(ry) / Double(rows - 1)
-            for cx in 0..<cols {
-                let s = Double(cx) / Double(cols - 1)
-                let c = ColorPalette.hsvToRGB(h: picker.hue, s: s, v: v)
-                ctx.setFillColor(c.cgColor)
-                ctx.fill(CGRect(x: svRect.minX + CGFloat(cx) * cw, y: svRect.minY + CGFloat(ry) * ch, width: cw + 0.6, height: ch + 0.6))
-            }
-        }
-        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.25))
-        ctx.stroke(svRect)
-
-        // SV indicator circle
+        // SV live-filled loupe ring
         let knobX = svRect.minX + CGFloat(picker.sat) * svRect.width
         let knobY = svRect.minY + CGFloat(1.0 - picker.val) * svRect.height
+        let svKnobRect = CGRect(x: knobX - 5.5, y: knobY - 5.5, width: 11, height: 11)
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: 1), blur: 3, color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.42))
+        ctx.setFillColor(liveColor.cgColor)
+        ctx.fillEllipse(in: svKnobRect)
         ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-        ctx.setLineWidth(2)
-        ctx.strokeEllipse(in: CGRect(x: knobX - 5, y: knobY - 5, width: 10, height: 10))
+        ctx.setLineWidth(2.0)
+        ctx.strokeEllipse(in: svKnobRect)
+        ctx.restoreGState()
 
-        // 2. Hue rainbow slider
-        let hueRect = CGRect(x: svRect.minX, y: svRect.maxY + 10, width: svRect.width, height: 12)
+        // 2. Smooth 7-stop Rainbow Hue pill slider
+        let hueRect = CGRect(x: svRect.minX, y: svRect.maxY + 11, width: svRect.width, height: 10)
         picker.hueRect = hueRect
-        let hSteps = 48
-        let hw = hueRect.width / CGFloat(hSteps)
-        for i in 0..<hSteps {
-            let h = Double(i) / Double(hSteps) * 360.0
-            ctx.setFillColor(ColorPalette.hsvToRGB(h: h, s: 1.0, v: 1.0).cgColor)
-            ctx.fill(CGRect(x: hueRect.minX + CGFloat(i) * hw, y: hueRect.minY, width: hw + 0.6, height: hueRect.height))
+        let hueClip = CGPath(roundedRect: hueRect, cornerWidth: 5, cornerHeight: 5, transform: nil)
+        ctx.saveGState()
+        ctx.addPath(hueClip)
+        ctx.clip()
+        let hueStops: [CGColor] = [0.0, 60.0, 120.0, 180.0, 240.0, 300.0, 360.0].map {
+            ColorPalette.hsvToRGB(h: $0, s: 1.0, v: 1.0).cgColor
         }
-        let hueKnobX = hueRect.minX + CGFloat(picker.hue / 360.0) * hueRect.width
-        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-        ctx.setLineWidth(2)
-        ctx.stroke(CGRect(x: hueKnobX - 3, y: hueRect.minY - 2, width: 6, height: hueRect.height + 4))
+        let hueLocs: [CGFloat] = [0.0, 1.0 / 6.0, 2.0 / 6.0, 3.0 / 6.0, 4.0 / 6.0, 5.0 / 6.0, 1.0]
+        if let hueGrad = CGGradient(colorsSpace: colorSpace, colors: hueStops as CFArray, locations: hueLocs) {
+            ctx.drawLinearGradient(
+                hueGrad,
+                start: CGPoint(x: hueRect.minX, y: hueRect.midY),
+                end: CGPoint(x: hueRect.maxX, y: hueRect.midY),
+                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+            )
+        }
+        ctx.restoreGState()
 
-        // 3. Quick swatches (2 rows x 6 cols, matching AirSnip `QUICK`)
+        ctx.addPath(hueClip)
+        ctx.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.14))
+        ctx.setLineWidth(0.6)
+        ctx.strokePath()
+
+        let rawHueX = hueRect.minX + CGFloat(picker.hue / 360.0) * hueRect.width
+        let hueKnobX = max(hueRect.minX + 5.0, min(hueRect.maxX - 5.0, rawHueX))
+        let hueThumb = CGRect(x: hueKnobX - 6.5, y: hueRect.midY - 6.5, width: 13, height: 13)
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: 1), blur: 2.5, color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.36))
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fillEllipse(in: hueThumb)
+        ctx.restoreGState()
+        ctx.setFillColor(pureHue.cgColor)
+        ctx.fillEllipse(in: hueThumb.insetBy(dx: 3.0, dy: 3.0))
+
+        // 3. Live HEX readout & swatch preview strip
+        let hexY = hueRect.maxY + 10
+        let previewDot = CGRect(x: svRect.minX, y: hexY + 1, width: 13, height: 13)
+        ctx.setFillColor(liveColor.cgColor)
+        ctx.fillEllipse(in: previewDot)
+        ctx.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.18))
+        ctx.setLineWidth(0.8)
+        ctx.strokeEllipse(in: previewDot)
+
+        let hexFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
+        let primaryText = dark ? NSColor(calibratedWhite: 0.92, alpha: 1) : NSColor(calibratedWhite: 0.18, alpha: 1)
+        let secondaryText = dark ? NSColor(calibratedWhite: 0.56, alpha: 1) : NSColor(calibratedWhite: 0.50, alpha: 1)
+        (liveColor.hexString as NSString).draw(
+            at: NSPoint(x: svRect.minX + 18, y: hexY),
+            withAttributes: [.font: hexFont, .foregroundColor: primaryText]
+        )
+        let tipStr: NSString = "预设色板"
+        let tipAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 9.5, weight: .regular), .foregroundColor: secondaryText]
+        let tipSz = tipStr.size(withAttributes: tipAttrs)
+        tipStr.draw(at: NSPoint(x: svRect.maxX - tipSz.width, y: hexY + 1), withAttributes: tipAttrs)
+
+        // 4. Circular quick swatches (2 rows x 6 cols)
         var quickRects: [(CGRect, RGBAColor)] = []
-        let qTop = hueRect.maxY + 10
-        let qSide: CGFloat = 20
+        let qTop = hexY + 21
+        let qSide: CGFloat = 18
         let qGapX = (svRect.width - qSide * 6) / 5.0
         for (idx, qc) in ColorPalette.quickColors.enumerated() {
             let r = idx / 6
@@ -1675,14 +2311,11 @@ final class OverlayCanvasView: NSView {
                 width: qSide,
                 height: qSide
             )
-            let qp = CGPath(roundedRect: qr, cornerWidth: 4, cornerHeight: 4, transform: nil)
-            ctx.addPath(qp)
             ctx.setFillColor(qc.cgColor)
-            ctx.fillPath()
-            ctx.addPath(qp)
-            ctx.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.25))
-            ctx.setLineWidth(1)
-            ctx.strokePath()
+            ctx.fillEllipse(in: qr)
+            ctx.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.18))
+            ctx.setLineWidth(0.8)
+            ctx.strokeEllipse(in: qr)
             quickRects.append((qr, qc))
         }
         picker.quickRects = quickRects
@@ -1690,22 +2323,40 @@ final class OverlayCanvasView: NSView {
     }
 
     private func drawTooltipBubble(in ctx: CGContext, text: String, anchor: CGRect) {
-        let font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
+        let font = NSFont.systemFont(ofSize: 11.0, weight: .medium)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor(calibratedWhite: 0.97, alpha: 1)]
         let sz = (text as NSString).size(withAttributes: attrs)
-        let w = sz.width + 14
-        let h = sz.height + 7
-        let x = max(6, min(bounds.width - w - 6, anchor.midX - w * 0.5))
-        var y = anchor.maxY + 7
+        let w = (sz.width + 14).rounded()
+        let h = (sz.height + 7).rounded()
+        let x = max(6, min(bounds.width - w - 6, (anchor.midX - w * 0.5).rounded()))
+        var placedBelow = true
+        var y = (anchor.maxY + 7).rounded()
         if y + h > bounds.height - 6 {
-            y = anchor.minY - h - 7
+            y = (anchor.minY - h - 7).rounded()
+            placedBelow = false
         }
         let rect = CGRect(x: x, y: y, width: w, height: h)
-        let path = CGPath(roundedRect: rect, cornerWidth: 5, cornerHeight: 5, transform: nil)
-        ctx.addPath(path)
-        ctx.setFillColor(CGColor(srgbRed: 0.08, green: 0.09, blue: 0.11, alpha: 0.90))
-        ctx.fillPath()
-        (text as NSString).draw(at: NSPoint(x: rect.minX + 7, y: rect.minY + 3.5), withAttributes: attrs)
+        let path = makeCalloutBubblePath(
+            rect: rect,
+            cornerRadius: 5.5,
+            arrowX: anchor.midX,
+            arrowOnTop: placedBelow,
+            arrowWidth: 8.5,
+            arrowHeight: 4.0
+        )
+        drawFrostedMaterial(
+            in: ctx,
+            path: path,
+            sampleRect: rect,
+            dark: true,
+            shadowOffsetY: 2.0,
+            shadowBlur: 8.0,
+            shadowAlpha: 0.26
+        )
+        (text as NSString).draw(
+            at: NSPoint(x: rect.minX + (w - sz.width) * 0.5, y: rect.minY + (h - sz.height) * 0.5),
+            withAttributes: attrs
+        )
     }
 
     private func drawCancelConfirmBanner(in ctx: CGContext, message: String) {
@@ -1748,11 +2399,35 @@ final class OverlayCanvasView: NSView {
 
     // MARK: - Mouse Events & Direct Manipulation
 
+    private func hitSelectionResizeHandle(at pt: ASPoint, in sel: ASRect) -> ResizeHandle? {
+        let corners: [ResizeHandle] = [.topLeft, .topRight, .bottomRight, .bottomLeft]
+        for h in corners where pt.distance(to: h.position(in: sel)) <= 9.0 {
+            return h
+        }
+        let visibleMids = visibleSelectionHandles(for: sel).filter { !corners.contains($0) }
+        for h in visibleMids where pt.distance(to: h.position(in: sel)) <= 8.5 {
+            return h
+        }
+        guard sel.width >= 20 && sel.height >= 20 else { return nil }
+        let innerMargin = (activeTool == nil) ? 4.5 : 3.2
+        let outerMargin = 5.0
+        if pt.x >= sel.minX - outerMargin && pt.x <= sel.maxX + outerMargin {
+            if pt.y >= sel.minY - outerMargin && pt.y <= sel.minY + innerMargin { return .top }
+            if pt.y >= sel.maxY - innerMargin && pt.y <= sel.maxY + outerMargin { return .bottom }
+        }
+        if pt.y >= sel.minY - outerMargin && pt.y <= sel.maxY + outerMargin {
+            if pt.x >= sel.minX - outerMargin && pt.x <= sel.minX + innerMargin { return .left }
+            if pt.x >= sel.maxX - innerMargin && pt.x <= sel.maxX + outerMargin { return .right }
+        }
+        return nil
+    }
+
     override func mouseMoved(with event: NSEvent) {
         let pt = ASPoint(convert(event.locationInWindow, from: nil))
         cursorPoint = pt
 
-        if selection == nil {
+        guard let sel = selection else {
+            if hoveredResizeHandle != nil { hoveredResizeHandle = nil }
             if coordinator?.config.windowSnap == true {
                 hoveredWindowRect = snapshot.windowRectsLocalTopDown.first(where: { $0.contains(pt) })
             } else {
@@ -1763,7 +2438,12 @@ final class OverlayCanvasView: NSView {
         }
 
         // Toolbar hover & 400ms tooltip (EDT-10)
+        var shouldRedraw = false
         if let hit = toolbarHitItems.first(where: { $0.rect.contains(pt.cgPoint) }) {
+            if hoveredResizeHandle != nil {
+                hoveredResizeHandle = nil
+                shouldRedraw = true
+            }
             if hoveredItemID != hit.id {
                 hoveredItemID = hit.id
                 activeTooltip = nil
@@ -1776,29 +2456,46 @@ final class OverlayCanvasView: NSView {
                     self?.activeTooltip = (tipText, anchor)
                     self?.needsDisplay = true
                 }
-                needsDisplay = true
+                shouldRedraw = true
             }
-        } else if let selObj = document.selectedObject,
-                  let cp = selObj.cornerHandlePoint,
-                  pt.distance(to: cp) <= 8.0 {
-            if hoveredItemID != "gizmo.corner" {
-                hoveredItemID = "gizmo.corner"
-                tooltipTask?.cancel()
-                let anchor = CGRect(x: cp.x - 5, y: cp.y - 5, width: 10, height: 10)
-                tooltipTask = Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 400_000_000)
-                    guard !Task.isCancelled else { return }
-                    self?.activeTooltip = ("拖动调整圆角", anchor)
-                    self?.needsDisplay = true
+        } else {
+            if let selObj = document.selectedObject,
+               let cp = selObj.cornerHandlePoint,
+               pt.distance(to: cp) <= 8.0 {
+                if hoveredItemID != "gizmo.corner" {
+                    hoveredItemID = "gizmo.corner"
+                    tooltipTask?.cancel()
+                    let anchor = CGRect(x: cp.x - 5, y: cp.y - 5, width: 10, height: 10)
+                    tooltipTask = Task { @MainActor [weak self] in
+                        try? await Task.sleep(nanoseconds: 400_000_000)
+                        guard !Task.isCancelled else { return }
+                        self?.activeTooltip = ("拖动调整圆角", anchor)
+                        self?.needsDisplay = true
+                    }
                 }
+            } else if hoveredItemID != nil {
+                hoveredItemID = nil
+                activeTooltip = nil
+                tooltipTask?.cancel()
+                shouldRedraw = true
             }
-        } else if hoveredItemID != nil {
-            hoveredItemID = nil
-            activeTooltip = nil
-            tooltipTask?.cancel()
-            needsDisplay = true
+
+            let nextKnot: ResizeHandle? = {
+                guard !selectionLocked else { return nil }
+                for h in visibleSelectionHandles(for: sel) where pt.distance(to: h.position(in: sel)) <= 8.5 {
+                    return h
+                }
+                return nil
+            }()
+            if hoveredResizeHandle != nextKnot {
+                hoveredResizeHandle = nextKnot
+                shouldRedraw = true
+            }
         }
 
+        if shouldRedraw {
+            needsDisplay = true
+        }
         updateCursor(at: pt, flags: event.modifierFlags)
     }
 
@@ -1808,7 +2505,11 @@ final class OverlayCanvasView: NSView {
             return
         }
         if let picker = colorPicker, picker.panelRect.contains(pt.cgPoint) {
-            NSCursor.crosshair.set()
+            if picker.quickRects.contains(where: { $0.0.contains(pt.cgPoint) }) {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.crosshair.set()
+            }
             return
         }
         guard let sel = selection else {
@@ -1820,16 +2521,16 @@ final class OverlayCanvasView: NSView {
             return
         }
         if let selObj = document.selectedObject {
-            for h in ResizeHandle.allCases where pt.distance(to: h.position(in: selObj.boundingBox)) <= 7.5 {
-                NSCursor.crosshair.set()
+            for h in ResizeHandle.allCases where pt.distance(to: h.position(in: selObj.boundingBox)) <= 8.0 {
+                DirectionalResizeCursor.cursor(for: h).set()
                 return
             }
-            if let cp = selObj.cornerHandlePoint, pt.distance(to: cp) <= 7.5 {
+            if let cp = selObj.cornerHandlePoint, pt.distance(to: cp) <= 8.0 {
                 NSCursor.pointingHand.set()
                 return
             }
             if let curve = selObj.curveControlPoints,
-               (pt.distance(to: curve.c1) <= 7.5 || pt.distance(to: curve.c2) <= 7.5) {
+               (pt.distance(to: curve.c1) <= 8.0 || pt.distance(to: curve.c2) <= 8.0) {
                 NSCursor.pointingHand.set()
                 return
             }
@@ -1842,11 +2543,9 @@ final class OverlayCanvasView: NSView {
             NSCursor.openHand.set()
             return
         }
-        if !selectionLocked {
-            for h in ResizeHandle.allCases where pt.distance(to: h.position(in: sel)) <= 7.5 {
-                NSCursor.crosshair.set()
-                return
-            }
+        if !selectionLocked, let h = hitSelectionResizeHandle(at: pt, in: sel) {
+            DirectionalResizeCursor.cursor(for: h).set()
+            return
         }
         if activeTool == nil, sel.contains(pt) {
             if document.hitTopmostObject(at: pt) != nil || !selectionLocked {
@@ -1899,12 +2598,20 @@ final class OverlayCanvasView: NSView {
             }
         }
 
-        // 2. Toolbar hit check
+        // 2. Toolbar hit check (with tactile press state & drag-out cancellation)
         if let hit = toolbarHitItems.first(where: { $0.rect.contains(pt.cgPoint) }) {
             if event.clickCount == 2, let dbl = hit.doubleClickAction {
+                pressedItemID = nil
+                dragOp = .none
                 dbl()
-            } else {
+            } else if hit.id == "text.family" {
+                pressedItemID = nil
+                dragOp = .none
                 hit.action()
+            } else {
+                pressedItemID = hit.id
+                dragOp = .pressingToolbarItem(id: hit.id)
+                needsDisplay = true
             }
             return
         }
@@ -1953,6 +2660,7 @@ final class OverlayCanvasView: NSView {
             }
             // 4c. 8 object resize handles
             for h in ResizeHandle.allCases where pt.distance(to: h.position(in: selObj.boundingBox)) <= 8.0 {
+                DirectionalResizeCursor.cursor(for: h).set()
                 dragOp = .resizingObject(
                     id: selObj.id,
                     handle: h,
@@ -1964,16 +2672,17 @@ final class OverlayCanvasView: NSView {
             }
         }
 
-        // 5. Selection 8 resize handles
-        if !selectionLocked {
-            for h in ResizeHandle.allCases where pt.distance(to: h.position(in: sel)) <= 8.0 {
-                dragOp = .resizingSelection(handle: h, initialRect: sel)
-                return
-            }
+        // 5. Selection 8 resize knots + 4 border edges
+        if !selectionLocked, let h = hitSelectionResizeHandle(at: pt, in: sel) {
+            DirectionalResizeCursor.cursor(for: h).set()
+            dragOp = .resizingSelection(handle: h, initialRect: sel)
+            needsDisplay = true
+            return
         }
 
         // 6. Space + drag -> move whole selection
         if spacePressed && !selectionLocked {
+            NSCursor.closedHand.set()
             dragOp = .movingSelection(startMouse: pt, initialRect: sel)
             return
         }
@@ -2025,6 +2734,7 @@ final class OverlayCanvasView: NSView {
                 } else {
                     document.selectedID = nil
                     if !selectionLocked {
+                        NSCursor.closedHand.set()
                         dragOp = .movingSelection(startMouse: pt, initialRect: sel)
                     }
                 }
@@ -2080,6 +2790,18 @@ final class OverlayCanvasView: NSView {
         switch dragOp {
         case .none:
             break
+
+        case .pressingToolbarItem(let id):
+            let inside = toolbarHitItems
+                .first(where: { $0.id == id })?
+                .rect
+                .insetBy(dx: -8, dy: -8)
+                .contains(rawPt.cgPoint) ?? false
+            let nextPressed = inside ? id : nil
+            if pressedItemID != nextPressed {
+                pressedItemID = nextPressed
+                needsDisplay = true
+            }
 
         case .adjustingColorSV(let idx):
             applyColorPickerSV(at: rawPt.cgPoint, swatchIndex: idx)
@@ -2202,7 +2924,19 @@ final class OverlayCanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        let pt = ASPoint(convert(event.locationInWindow, from: nil))
         switch dragOp {
+        case .pressingToolbarItem(let id):
+            let wasActivePress = (pressedItemID == id)
+            pressedItemID = nil
+            dragOp = .none
+            if wasActivePress, let hit = toolbarHitItems.first(where: { $0.id == id }) {
+                hit.action()
+            }
+            needsDisplay = true
+            updateCursor(at: pt, flags: event.modifierFlags)
+            return
+
         case .creatingSelection(_, let moved):
             if !moved {
                 if let snapped = hoveredWindowRect, coordinator?.config.windowSnap == true {
@@ -2218,6 +2952,9 @@ final class OverlayCanvasView: NSView {
             }
             needsDisplay = true
 
+        case .resizingSelection:
+            needsDisplay = true
+
         case .drawingNewAnnotation(_, let draftObjectID, _, let hitCandidateID):
             if activeTool != .number && draftObjectID == nil {
                 // Click without drag inside selection -> select hit object (or deselect if blank)! (EDT-11)
@@ -2229,6 +2966,7 @@ final class OverlayCanvasView: NSView {
             break
         }
         dragOp = .none
+        updateCursor(at: pt, flags: event.modifierFlags)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -2405,8 +3143,14 @@ final class OverlayCanvasView: NSView {
                 document.updateObject(id: selID, recordUndo: true) { $0.translate(dx: dx, dy: dy) }
                 needsDisplay = true
             } else if var sel = selection, !selectionLocked {
-                sel.x = max(0, min(Double(bounds.width) - sel.width, sel.x + dx))
-                sel.y = max(0, min(Double(bounds.height) - sel.height, sel.y + dy))
+                if flags.contains(.option) {
+                    // Option + Arrow: 1pt / 5pt precision width/height micro-resize
+                    sel.width = max(8, min(Double(bounds.width) - sel.x, sel.width + dx))
+                    sel.height = max(8, min(Double(bounds.height) - sel.y, sel.height + dy))
+                } else {
+                    sel.x = max(0, min(Double(bounds.width) - sel.width, sel.x + dx))
+                    sel.y = max(0, min(Double(bounds.height) - sel.height, sel.y + dy))
+                }
                 selection = sel
                 needsDisplay = true
             }

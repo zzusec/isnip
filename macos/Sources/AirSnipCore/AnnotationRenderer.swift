@@ -449,43 +449,56 @@ public enum AnnotationRenderer {
 
     /// Screen-only selection adornments (bounding frame, 8 resize handles, corner-radius handle, Bezier curve handles).
     public static func drawSelectionGizmos(in ctx: CGContext, for object: AnnotationObject) {
-        let accent = CGColor(srgbRed: 0.12, green: 0.53, blue: 0.90, alpha: 1.0)
+        let accent = CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 1.0)
         let box = object.boundingBox
 
         ctx.saveGState()
-        // Dashed frame
-        ctx.setStrokeColor(accent)
-        ctx.setLineWidth(1.2)
+        // Crisp dashed bounding frame
+        ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.85))
+        ctx.setLineWidth(1.0)
         ctx.setLineDash(phase: 0, lengths: [4, 3])
         ctx.stroke(box.cgRect)
         ctx.setLineDash(phase: 0, lengths: [])
 
-        // 8 square resize handles
-        let handleSize: CGFloat = 6.5
+        // 8 precision circular resize handles with soft shadow
+        let handleDiameter: CGFloat = 6.8
         for h in ResizeHandle.allCases {
+            if (h == .top || h == .bottom) && box.width < 36 { continue }
+            if (h == .left || h == .right) && box.height < 36 { continue }
             let p = h.position(in: box)
-            let hr = CGRect(x: CGFloat(p.x) - handleSize * 0.5, y: CGFloat(p.y) - handleSize * 0.5, width: handleSize, height: handleSize)
+            let hr = CGRect(
+                x: CGFloat(p.x) - handleDiameter * 0.5,
+                y: CGFloat(p.y) - handleDiameter * 0.5,
+                width: handleDiameter,
+                height: handleDiameter
+            )
+            ctx.saveGState()
+            ctx.setShadow(offset: CGSize(width: 0, height: 1), blur: 2, color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.25))
             ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-            ctx.fill(hr)
+            ctx.fillEllipse(in: hr)
+            ctx.restoreGState()
             ctx.setStrokeColor(accent)
-            ctx.setLineWidth(1.2)
-            ctx.stroke(hr)
+            ctx.setLineWidth(1.3)
+            ctx.strokeEllipse(in: hr)
         }
 
-        // Corner radius circular handle
+        // Corner radius circular handle (warm amber core to distinguish from resize handles)
         if let cp = object.cornerHandlePoint {
-            let r: CGFloat = 4.5
+            let r: CGFloat = 4.2
             let cr = CGRect(x: CGFloat(cp.x) - r, y: CGFloat(cp.y) - r, width: r * 2, height: r * 2)
-            ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            ctx.saveGState()
+            ctx.setShadow(offset: CGSize(width: 0, height: 1), blur: 2, color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.25))
+            ctx.setFillColor(CGColor(srgbRed: 1.0, green: 0.96, blue: 0.84, alpha: 1))
             ctx.fillEllipse(in: cr)
-            ctx.setStrokeColor(accent)
-            ctx.setLineWidth(1.5)
+            ctx.restoreGState()
+            ctx.setStrokeColor(CGColor(srgbRed: 0.96, green: 0.62, blue: 0.04, alpha: 1))
+            ctx.setLineWidth(1.4)
             ctx.strokeEllipse(in: cr)
         }
 
         // Cubic arrow control handles + dashed guide lines (EDT-3)
         if let curve = object.curveControlPoints {
-            ctx.setStrokeColor(CGColor(srgbRed: 0.12, green: 0.53, blue: 0.90, alpha: 0.72))
+            ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.65))
             ctx.setLineWidth(1.0)
             ctx.setLineDash(phase: 0, lengths: [3, 3])
             ctx.move(to: curve.from.cgPoint)
@@ -496,12 +509,15 @@ public enum AnnotationRenderer {
             ctx.setLineDash(phase: 0, lengths: [])
 
             for pt in [curve.c1, curve.c2] {
-                let r: CGFloat = 5.0
+                let r: CGFloat = 4.6
                 let cr = CGRect(x: CGFloat(pt.x) - r, y: CGFloat(pt.y) - r, width: r * 2, height: r * 2)
+                ctx.saveGState()
+                ctx.setShadow(offset: CGSize(width: 0, height: 1), blur: 2, color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.28))
                 ctx.setFillColor(accent)
                 ctx.fillEllipse(in: cr)
+                ctx.restoreGState()
                 ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-                ctx.setLineWidth(1.5)
+                ctx.setLineWidth(1.4)
                 ctx.strokeEllipse(in: cr)
             }
         }
