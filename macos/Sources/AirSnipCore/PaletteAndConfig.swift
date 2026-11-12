@@ -459,6 +459,7 @@ public enum KeyCodeLabels {
 
 public struct HotkeyConfig: Codable, Equatable, Sendable {
     public var screenshot: HotkeyBinding
+    public var ocrCapture: HotkeyBinding
     public var pin: HotkeyBinding
     public var pinBorderToggle: HotkeyBinding
     public var recapture: HotkeyBinding
@@ -467,6 +468,7 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
 
     public init(
         screenshot: HotkeyBinding = HotkeyBinding(keyCode: kVK_F1, modifiers: []),
+        ocrCapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F2, modifiers: []),
         pin: HotkeyBinding = HotkeyBinding(keyCode: kVK_F3, modifiers: []),
         pinBorderToggle: HotkeyBinding = HotkeyBinding(keyCode: kVK_F3, modifiers: [.control]),
         recapture: HotkeyBinding = HotkeyBinding(keyCode: kVK_F1, modifiers: [.shift]),
@@ -474,11 +476,28 @@ public struct HotkeyConfig: Codable, Equatable, Sendable {
         ocr: HotkeyBinding = HotkeyBinding(keyCode: kVK_ANSI_T, modifiers: [])
     ) {
         self.screenshot = screenshot
+        self.ocrCapture = ocrCapture
         self.pin = pin
         self.pinBorderToggle = pinBorderToggle
         self.recapture = recapture
         self.longshot = longshot
         self.ocr = ocr
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case screenshot, ocrCapture, pin, pinBorderToggle, recapture, longshot, ocr
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = HotkeyConfig()
+        self.screenshot = try c.decodeIfPresent(HotkeyBinding.self, forKey: .screenshot) ?? defaults.screenshot
+        self.ocrCapture = try c.decodeIfPresent(HotkeyBinding.self, forKey: .ocrCapture) ?? defaults.ocrCapture
+        self.pin = try c.decodeIfPresent(HotkeyBinding.self, forKey: .pin) ?? defaults.pin
+        self.pinBorderToggle = try c.decodeIfPresent(HotkeyBinding.self, forKey: .pinBorderToggle) ?? defaults.pinBorderToggle
+        self.recapture = try c.decodeIfPresent(HotkeyBinding.self, forKey: .recapture) ?? defaults.recapture
+        self.longshot = try c.decodeIfPresent(HotkeyBinding.self, forKey: .longshot) ?? defaults.longshot
+        self.ocr = try c.decodeIfPresent(HotkeyBinding.self, forKey: .ocr) ?? defaults.ocr
     }
 }
 
@@ -595,10 +614,31 @@ public enum UiScaleSetting: String, Codable, CaseIterable, Sendable {
 public struct OcrConfig: Codable, Equatable, Sendable {
     public var autoCopy: Bool
     public var language: String // "auto", "zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"
+    public var mergeLineBreaks: Bool
+    public var detectBarcodes: Bool
 
-    public init(autoCopy: Bool = false, language: String = "auto") {
+    public init(
+        autoCopy: Bool = false,
+        language: String = "auto",
+        mergeLineBreaks: Bool = false,
+        detectBarcodes: Bool = true
+    ) {
         self.autoCopy = autoCopy
         self.language = language
+        self.mergeLineBreaks = mergeLineBreaks
+        self.detectBarcodes = detectBarcodes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case autoCopy, language, mergeLineBreaks, detectBarcodes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.autoCopy = try c.decodeIfPresent(Bool.self, forKey: .autoCopy) ?? false
+        self.language = try c.decodeIfPresent(String.self, forKey: .language) ?? "auto"
+        self.mergeLineBreaks = try c.decodeIfPresent(Bool.self, forKey: .mergeLineBreaks) ?? false
+        self.detectBarcodes = try c.decodeIfPresent(Bool.self, forKey: .detectBarcodes) ?? true
     }
 
     public static let supportedOptions: [(tag: String, label: String)] = [
@@ -608,6 +648,15 @@ public struct OcrConfig: Codable, Equatable, Sendable {
         ("en-US", "英文 (English)"),
         ("ja-JP", "日文 (日本語)"),
         ("ko-KR", "韩文 (한국어)"),
+    ]
+
+    public static let compactOptions: [(tag: String, shortLabel: String)] = [
+        ("auto", "自动识别"),
+        ("zh-Hans", "简中+英"),
+        ("zh-Hant", "繁中+英"),
+        ("en-US", "English"),
+        ("ja-JP", "日本語"),
+        ("ko-KR", "한국어"),
     ]
 }
 
@@ -730,6 +779,7 @@ public struct AirSnipConfig: Codable, Equatable, Sendable {
         var conflicts: [String] = []
         let globalList: [(String, HotkeyBinding)] = [
             ("全局截图", hotkeys.screenshot),
+            ("全局截图 OCR", hotkeys.ocrCapture),
             ("全局贴图", hotkeys.pin),
             ("贴图边框切换", hotkeys.pinBorderToggle),
         ]

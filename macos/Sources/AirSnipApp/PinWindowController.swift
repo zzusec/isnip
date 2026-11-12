@@ -6,6 +6,7 @@ import AirSnipCore
 public final class PinManager: ObservableObject {
     @Published public private(set) var windows: [PinWindowController] = []
     public var onRequestAnnotatePin: ((PinWindowController) -> Void)?
+    public var onRequestOCRPin: ((PinWindowController) -> Void)?
     public var getConfig: (() -> AirSnipConfig)?
     public var updateConfig: (((inout AirSnipConfig) -> Void) -> Void)?
 
@@ -218,6 +219,10 @@ public final class PinWindowController: NSObject {
         manager?.onRequestAnnotatePin?(self)
     }
 
+    public func requestOCR() {
+        manager?.onRequestOCRPin?(self)
+    }
+
     public func copyToClipboard() {
         OutputService.copyImageToClipboard(cgImage, backingScale: backingScale)
         ToastHUD.show("已复制贴图")
@@ -345,6 +350,8 @@ private final class PinCanvasView: NSView {
             owner.closeSelf()
         case kVK_Space:
             owner.requestInlineAnnotate()
+        case kVK_ANSI_T:
+            owner.requestOCR()
         case kVK_LeftArrow:
             win.setFrameOrigin(NSPoint(x: win.frame.origin.x - step, y: win.frame.origin.y))
         case kVK_RightArrow:
@@ -364,6 +371,10 @@ private final class PinCanvasView: NSView {
         let editItem = NSMenuItem(title: "编辑标注 (Space)", action: #selector(onEdit), keyEquivalent: "")
         editItem.target = self
         menu.addItem(editItem)
+
+        let ocrItem = NSMenuItem(title: "识别贴图文字 (T)", action: #selector(onOCR), keyEquivalent: "")
+        ocrItem.target = self
+        menu.addItem(ocrItem)
 
         let copyItem = NSMenuItem(title: "复制图片", action: #selector(onCopy), keyEquivalent: "c")
         copyItem.target = self
@@ -400,6 +411,7 @@ private final class PinCanvasView: NSView {
     }
 
     @objc private func onEdit() { owner?.requestInlineAnnotate() }
+    @objc private func onOCR() { owner?.requestOCR() }
     @objc private func onCopy() { owner?.copyToClipboard() }
     @objc private func onSave() { owner?.saveAs() }
     @objc private func onToggleBorder() {

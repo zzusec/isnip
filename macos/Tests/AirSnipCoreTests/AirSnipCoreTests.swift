@@ -230,7 +230,7 @@ final class AirSnipCoreTests: XCTestCase {
         // Out-of-order multi-segment visual row sorting
         let segs = [
             OCRTextSegment(left: 26, top: 58, bottom: 74, words: ["第一行"]),
-            OCRTextSegment(left: 25, top: 100, bottom: 116, words: ["第二行"]),
+            OCRTextSegment(left: 25, top: 82, bottom: 98, words: ["第二行"]),
             OCRTextSegment(left: 236, top: 58, bottom: 74, words: ["中段"]),
             OCRTextSegment(left: 640, top: 58, bottom: 74, words: ["尾段"]),
         ]
@@ -239,5 +239,31 @@ final class AirSnipCoreTests: XCTestCase {
             OCRLinesJoiner.joinSegments([OCRTextSegment(left: 0, top: 0, bottom: 16, words: ["讠 兑", "你 好"])]),
             "讠兑你好"
         )
+    }
+
+    func testOCRParagraphMergeAndLegacyConfigCompat() throws {
+        let wrappedCJK = "这是一段被PDF强制\n折行的中文说明文字\n\n• 第一条特性\n• 第二条特性"
+        XCTAssertEqual(
+            OCRLinesJoiner.mergeWrappedParagraphs(wrappedCJK),
+            "这是一段被PDF强制折行的中文说明文字\n\n• 第一条特性\n\n• 第二条特性"
+        )
+
+        let wrappedEnglish = "Offline Vision recog-\nnition runs locally on\nmacOS without cloud."
+        XCTAssertEqual(
+            OCRLinesJoiner.mergeWrappedParagraphs(wrappedEnglish),
+            "Offline Vision recognition runs locally on macOS without cloud."
+        )
+
+        // Legacy v0.1.0 OcrConfig & HotkeyConfig without v0.2.0 keys must decode seamlessly
+        let legacyOcrJSON = #"{"autoCopy":true,"language":"zh-Hans"}"#.data(using: .utf8)!
+        let decodedOcr = try JSONDecoder().decode(OcrConfig.self, from: legacyOcrJSON)
+        XCTAssertTrue(decodedOcr.autoCopy)
+        XCTAssertEqual(decodedOcr.language, "zh-Hans")
+        XCTAssertFalse(decodedOcr.mergeLineBreaks)
+        XCTAssertTrue(decodedOcr.detectBarcodes)
+
+        let legacyHotkeyJSON = #"{"screenshot":{"keyCode":122,"modifiers":0}}"#.data(using: .utf8)!
+        let decodedHK = try JSONDecoder().decode(HotkeyConfig.self, from: legacyHotkeyJSON)
+        XCTAssertEqual(decodedHK.ocrCapture.displayString, "F2")
     }
 }

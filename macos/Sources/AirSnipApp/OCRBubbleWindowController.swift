@@ -15,8 +15,10 @@ private final class KeyableBubblePanel: NSPanel {
 @MainActor
 public final class OCRBubbleManager: ObservableObject {
     @Published public var text: String = ""
+    @Published public var barcodes: [String] = []
     @Published public var isRecognizing: Bool = false
     @Published public var errorMessage: String?
+    @Published public var sourceImage: CGImage?
     @Published public var isPinnedOnTop: Bool = true {
         didSet {
             panel?.level = isPinnedOnTop ? .floating : .normal
@@ -24,15 +26,34 @@ public final class OCRBubbleManager: ObservableObject {
     }
     @Published public var autoCopy: Bool = false {
         didSet {
-            onAutoCopyChanged?(autoCopy)
+            guard !suppressCallback else { return }
+            onConfigChanged?(selectedLanguage, autoCopy, mergeLineBreaks)
+        }
+    }
+    @Published public var mergeLineBreaks: Bool = false {
+        didSet {
+            guard !suppressCallback else { return }
+            applyLineBreakModeAfterToggle()
+            onConfigChanged?(selectedLanguage, autoCopy, mergeLineBreaks)
+        }
+    }
+    @Published public var selectedLanguage: String = "auto" {
+        didSet {
+            guard !suppressCallback, oldValue != selectedLanguage else { return }
+            onConfigChanged?(selectedLanguage, autoCopy, mergeLineBreaks)
+            rerunRecognitionIfPossible()
         }
     }
     @Published public var copiedFeedback: Bool = false
-    @Published public var languageLabel: String = "自动识别"
+
+    private var rawRecognizedText: String = ""
+    private var paragraphRecognizedText: String = ""
+    private var detectBarcodesEnabled: Bool = true
+    private var suppressCallback: Bool = false
 
     private var panel: KeyableBubblePanel?
     private var recognitionTask: Task<Void, Never>?
-    public var onAutoCopyChanged: ((Bool) -> Void)?
+    public var onConfigChanged: ((_ language: String, _ autoCopy: Bool, _ mergeLineBreaks: Bool) -> Void)?
 
     public init() {}
 
@@ -42,29 +63,65 @@ public final class OCRBubbleManager: ObservableObject {
         config: AirSnipConfig
     ) {
         recognitionTask?.cancel()
+        suppressCallback = true
         self.autoCopy = config.ocr.autoCopy
-        self.languageLabel = OcrConfig.supportedOptions.first(where: { $0.tag == config.ocr.language })?.label ?? "自动识别"
+        self.mergeLineBreaks = config.ocr.mergeLineBreaks
+        self.selectedLanguage = config.ocr.language
+        self.detectBarcodesEnabled = config.ocr.detectBarcodes
+        suppressCallback = false
+
+        self.sourceImage = rawSelectionImage
+        self.copiedFeedback = false
+        ensurePanel(near: anchorScreenPoint, theme: config.theme)
+        startRecognition(on: rawSelectionImage)
+    }
+
+    public func rerunRecognitionIfPossible() {
+        guard let img = sourceImage else { return }
+        recognitionTask?.cancel()
+        startRecognition(on: img)
+    }
+
+    private func startRecognition(on image: CGImage) {
         self.isRecognizing = true
         self.errorMessage = nil
         self.text = ""
-        self.copiedFeedback = false
+        self.barcodes = []
+        self.rawRecognizedText = ""
+        self.paragraphRecognizedText = ""
 
-        ensurePanel(near: anchorScreenPoint, theme: config.theme)
+        let lang = selectedLanguage
+        let wantBarcodes = detectBarcodesEnabled
 
-        let lang = config.ocr.language
         recognitionTask = Task { [weak self] in
             do {
-                let extracted = try await Task.detached(priority: .userInitiated) {
-                    try LocalVisionOCR.recognize(cgImage: rawSelectionImage, languagePreference: lang)
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try LocalVisionOCR.recognizeDetailed(
+                        cgImage: image,
+                        languagePreference: lang,
+                        detectBarcodes: wantBarcodes
+                    )
                 }.value
                 guard !Task.isCancelled, let self else { return }
                 self.isRecognizing = false
-                if extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    self.errorMessage = "未在选区内识别到文字"
+                self.barcodes = result.barcodes
+                self.rawRecognizedText = result.rawText
+                self.paragraphRecognizedText = result.paragraphText
+
+                if result.isEmpty {
+                    self.errorMessage = "未在图像中识别到文字或二维码"
                 } else {
-                    self.text = extracted
+                    let chosen: String
+                    if result.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        chosen = result.barcodes.joined(separator: "\n")
+                        self.rawRecognizedText = chosen
+                        self.paragraphRecognizedText = chosen
+                    } else {
+                        chosen = self.mergeLineBreaks ? result.paragraphText : result.rawText
+                    }
+                    self.text = chosen
                     if self.autoCopy {
-                        OutputService.copyStringToClipboard(extracted)
+                        OutputService.copyStringToClipboard(chosen)
                         self.triggerCopiedFeedback()
                     }
                 }
@@ -76,10 +133,30 @@ public final class OCRBubbleManager: ObservableObject {
         }
     }
 
+    private func applyLineBreakModeAfterToggle() {
+        guard !rawRecognizedText.isEmpty else { return }
+        if mergeLineBreaks {
+            if text == rawRecognizedText {
+                text = paragraphRecognizedText
+            } else {
+                text = OCRLinesJoiner.mergeWrappedParagraphs(text)
+            }
+        } else {
+            if text == paragraphRecognizedText {
+                text = rawRecognizedText
+            }
+        }
+    }
+
     public func copyCurrentText() {
         guard !text.isEmpty else { return }
         OutputService.copyStringToClipboard(text)
         triggerCopiedFeedback()
+    }
+
+    public func copyBarcode(_ payload: String) {
+        OutputService.copyStringToClipboard(payload)
+        ToastHUD.show("已复制二维码/条码内容")
     }
 
     private func triggerCopiedFeedback() {
@@ -96,8 +173,8 @@ public final class OCRBubbleManager: ObservableObject {
     }
 
     private func ensurePanel(near anchor: NSPoint?, theme: ThemeSetting) {
-        let width: CGFloat = 440
-        let height: CGFloat = 310
+        let width: CGFloat = 480
+        let height: CGFloat = 350
         let screen = NSScreen.main ?? NSScreen.screens.first
         let vis = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
 
@@ -131,7 +208,7 @@ public final class OCRBubbleManager: ObservableObject {
         newPanel.standardWindowButton(.zoomButton)?.isHidden = true
         newPanel.isMovableByWindowBackground = true
         newPanel.level = isPinnedOnTop ? .floating : .normal
-        newPanel.minSize = NSSize(width: 340, height: 220)
+        newPanel.minSize = NSSize(width: 380, height: 250)
         newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         newPanel.onEscape = { [weak self] in self?.dismiss() }
         applyTheme(theme, to: newPanel)
@@ -156,6 +233,15 @@ private struct OCRBubbleCardView: View {
     @ObservedObject var manager: OCRBubbleManager
     @FocusState private var editorFocused: Bool
 
+    private func webURL(from payload: String) -> URL? {
+        guard let url = URL(string: payload),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return nil
+        }
+        return url
+    }
+
     var body: some View {
         VStack(spacing: 10) {
             // Top bar
@@ -165,11 +251,27 @@ private struct OCRBubbleCardView: View {
                     .foregroundStyle(Color.accentColor)
                 Text("OCR 文字识别")
                     .font(.system(size: 13, weight: .semibold))
-                Text("· \(manager.languageLabel)")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
 
-                Spacer()
+                if let cg = manager.sourceImage {
+                    Text("\(cg.width)×\(cg.height)")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Capsule().fill(Color.primary.opacity(0.07)))
+                }
+
+                Spacer(minLength: 4)
+
+                Picker("", selection: $manager.selectedLanguage) {
+                    ForEach(OcrConfig.compactOptions, id: \.tag) { opt in
+                        Text(opt.shortLabel).tag(opt.tag)
+                    }
+                }
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 96)
+                .help("切换识别语言并立即重新识别")
 
                 Button {
                     manager.isPinnedOnTop.toggle()
@@ -198,25 +300,60 @@ private struct OCRBubbleCardView: View {
                 .help("关闭 (Esc)")
             }
 
+            // Detected QR / Barcodes banner (if any)
+            if !manager.barcodes.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(manager.barcodes, id: \.self) { code in
+                        HStack(spacing: 6) {
+                            Image(systemName: "qrcode.viewfinder")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Color.accentColor)
+                            Text(code)
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 4)
+                            if let url = webURL(from: code) {
+                                Button("打开链接") {
+                                    NSWorkspace.shared.open(url)
+                                }
+                                .controlSize(.mini)
+                            }
+                            Button("复制") {
+                                manager.copyBarcode(code)
+                            }
+                            .controlSize(.mini)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.10)))
+                    }
+                }
+            }
+
             // Editable native text area
             ZStack {
                 if manager.isRecognizing {
                     VStack(spacing: 8) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("正在本地识别文字（图片不出本机）…")
+                        Text("正在本地离线识别（图像不出本机）…")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let err = manager.errorMessage {
-                    VStack(spacing: 6) {
+                    VStack(spacing: 8) {
                         Image(systemName: "doc.text.magnifyingglass")
                             .font(.system(size: 22))
                             .foregroundStyle(.secondary)
                         Text(err)
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
+                        Button("重新识别") {
+                            manager.rerunRecognitionIfPossible()
+                        }
+                        .controlSize(.small)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -262,12 +399,19 @@ private struct OCRBubbleCardView: View {
                 .disabled(manager.text.isEmpty || manager.isRecognizing)
 
                 if !manager.text.isEmpty {
-                    Text("\(manager.text.count) 字")
+                    let lineCount = manager.text.components(separatedBy: "\n").count
+                    Text("\(manager.text.count) 字 · \(lineCount) 行")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
 
-                Spacer()
+                Spacer(minLength: 4)
+
+                Toggle("合并换行", isOn: $manager.mergeLineBreaks)
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .font(.system(size: 12))
+                    .help("自动合并段落内的软换行，保留空行与列表项")
 
                 Toggle("自动复制", isOn: $manager.autoCopy)
                     .toggleStyle(.switch)

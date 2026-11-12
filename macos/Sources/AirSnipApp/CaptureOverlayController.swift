@@ -12,8 +12,14 @@ private final class OverlayPanel: NSPanel {
 public final class CaptureSessionCoordinator {
     public enum SessionMode {
         case normalCapture
+        case directOCRCapture
         case inlinePinEdit(PinWindowController)
         case standaloneImageEdit(CGImage, Double, NSScreen)
+    }
+
+    public var isDirectOCRCapture: Bool {
+        if case .directOCRCapture = mode { return true }
+        return false
     }
 
     private var screenControllers: [OverlayScreenController] = []
@@ -594,6 +600,10 @@ final class OverlayCanvasView: NSView {
             }
 
             drawMagnifierHUD(in: ctx, at: cursorPoint)
+
+            if coordinator?.isDirectOCRCapture == true, cancelConfirmBanner == nil {
+                drawCancelConfirmBanner(in: ctx, message: "OCR 文字识别模式：框选区域或单击窗口即可直接识别文字 · Esc 取消")
+            }
         }
 
         if let banner = cancelConfirmBanner {
@@ -1671,6 +1681,11 @@ final class OverlayCanvasView: NSView {
                 }
             } else if let sel = selection, (sel.width < 4 || sel.height < 4) {
                 selection = nil
+            }
+            if coordinator?.isDirectOCRCapture == true, let sel = selection, sel.width >= 4, sel.height >= 4 {
+                dragOp = .none
+                triggerOCR()
+                return
             }
             needsDisplay = true
 

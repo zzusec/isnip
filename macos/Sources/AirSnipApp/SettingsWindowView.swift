@@ -35,6 +35,10 @@ public final class SettingsWindowController {
         win.makeKeyAndOrderFront(nil)
     }
 
+    public func hide() {
+        window?.orderOut(nil)
+    }
+
     public func refreshTheme() {
         if let win = window {
             applyTheme(appController.config.theme, to: win)
@@ -363,8 +367,10 @@ private struct HotkeysSettingsPane: View {
                 .background(RoundedRectangle(cornerRadius: 7).fill(Color.orange.opacity(0.12)))
             }
 
-            if app.config.hotkeys.screenshot.hasNoModifierWarning || app.config.hotkeys.pin.hasNoModifierWarning {
-                Label("提示：全局热键使用单键（如 F1 / F3）会拦截其他软件的同名按键；如需避免冲突可改为 ⌃A / ⌥S 等修饰键组合。", systemImage: "info.circle")
+            if app.config.hotkeys.screenshot.hasNoModifierWarning
+                || app.config.hotkeys.ocrCapture.hasNoModifierWarning
+                || app.config.hotkeys.pin.hasNoModifierWarning {
+                Label("提示：全局热键使用单键（如 F1 / F2 / F3）会拦截其他软件的同名按键；如需避免冲突可改为 ⌃A / ⌥S 等修饰键组合。", systemImage: "info.circle")
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
             }
@@ -373,6 +379,10 @@ private struct HotkeysSettingsPane: View {
                 VStack(spacing: 8) {
                     HotkeyRow(title: "触发截图", slotID: "global.screenshot", binding: app.config.hotkeys.screenshot, recordingSlot: $recordingSlot) { b in
                         app.updateConfig { $0.hotkeys.screenshot = b }
+                    }
+                    Divider()
+                    HotkeyRow(title: "直接截图 OCR 识别（松手即提取文字）", slotID: "global.ocrCapture", binding: app.config.hotkeys.ocrCapture, recordingSlot: $recordingSlot) { b in
+                        app.updateConfig { $0.hotkeys.ocrCapture = b }
                     }
                     Divider()
                     HotkeyRow(title: "贴图（选区或剪贴板）", slotID: "global.pin", binding: app.config.hotkeys.pin, recordingSlot: $recordingSlot) { b in
@@ -687,7 +697,7 @@ private struct OCRSettingsPane: View {
             Text("本地离线 OCR 识别")
                 .font(.system(size: 17, weight: .bold))
 
-            GroupBox {
+            GroupBox("识别行为与排版") {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Text("识别语言偏好")
@@ -709,6 +719,50 @@ private struct OCRSettingsPane: View {
                         get: { app.config.ocr.autoCopy },
                         set: { ac in app.updateConfig { $0.ocr.autoCopy = ac } }
                     ))
+
+                    Toggle("默认合并段落内的软换行（保留空行与列表项）", isOn: Binding(
+                        get: { app.config.ocr.mergeLineBreaks },
+                        set: { mb in app.updateConfig { $0.ocr.mergeLineBreaks = mb } }
+                    ))
+
+                    Toggle("同时识别图片中的二维码与条形码", isOn: Binding(
+                        get: { app.config.ocr.detectBarcodes },
+                        set: { db in app.updateConfig { $0.ocr.detectBarcodes = db } }
+                    ))
+                }
+                .padding(6)
+            }
+
+            GroupBox("快捷触发入口") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Button {
+                            app.settingsController?.hide()
+                            Task { @MainActor in
+                                try? await Task.sleep(nanoseconds: 180_000_000)
+                                app.triggerDirectOCRCapture()
+                            }
+                        } label: {
+                            Label("立即框选识别文字", systemImage: "text.viewfinder")
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button {
+                            app.triggerOCRFromClipboard()
+                        } label: {
+                            Label("识别剪贴板图片", systemImage: "doc.on.clipboard")
+                        }
+
+                        Button {
+                            app.triggerOCRFromFile()
+                        } label: {
+                            Label("选择图片文件…", systemImage: "photo")
+                        }
+                    }
+
+                    Text("支持 5 种触发方式：① 全局快捷键 \(app.config.hotkeys.ocrCapture.displayString) 框选松手即识别；② 常规截图（\(app.config.hotkeys.screenshot.displayString)）中按 \(app.config.hotkeys.ocr.displayString) 或点工具栏 OCR 图标；③ 贴图窗口按 T 或右键菜单识别；④ 长截图控制栏点击 OCR；⑤ 菜单栏直接识别剪贴板或本地图片。")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
                 }
                 .padding(6)
             }

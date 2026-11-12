@@ -19,6 +19,22 @@ public struct OCRTextSegment: Equatable, Sendable {
     public var height: Double { max(1.0, bottom - top) }
 }
 
+public struct OCRRecognitionResult: Equatable, Sendable {
+    public var rawText: String
+    public var paragraphText: String
+    public var barcodes: [String]
+
+    public init(rawText: String, paragraphText: String, barcodes: [String] = []) {
+        self.rawText = rawText
+        self.paragraphText = paragraphText
+        self.barcodes = barcodes
+    }
+
+    public var isEmpty: Bool {
+        rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && barcodes.isEmpty
+    }
+}
+
 public enum OCRLinesJoiner {
     public static func joinSegments(_ input: [OCRTextSegment]) -> String {
         let sorted = input.sorted { $0.centerY < $1.centerY }
@@ -34,6 +50,8 @@ public enum OCRLinesJoiner {
         }
 
         var output = ""
+        var prevBottom: Double?
+
         for var row in rows {
             row.sort { $0.left < $1.left }
             let words = row
@@ -41,7 +59,20 @@ public enum OCRLinesJoiner {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
             if words.isEmpty { continue }
-            if !output.isEmpty { output.append("\n") }
+
+            let rowTop = row.map(\.top).min() ?? 0
+            let rowBottom = row.map(\.bottom).max() ?? rowTop
+            let rowHeight = max(1.0, rowBottom - rowTop)
+
+            if !output.isEmpty {
+                if let pb = prevBottom, (rowTop - pb) > rowHeight * 0.95 {
+                    output.append("\n\n")
+                } else {
+                    output.append("\n")
+                }
+            }
+            prevBottom = rowBottom
+
             for (i, w) in words.enumerated() {
                 if i > 0 && needSpace(between: words[i - 1], and: w) {
                     output.append(" ")
@@ -50,6 +81,64 @@ public enum OCRLinesJoiner {
             }
         }
         return stripCJKSpaces(output)
+    }
+
+    /// Merges single-line soft wraps within paragraphs while keeping blank-line paragraph breaks and bullet lists intact.
+    public static func mergeWrappedParagraphs(_ raw: String) -> String {
+        let lines = raw.components(separatedBy: "\n")
+        var paragraphs: [String] = []
+        var current = ""
+
+        for rawLine in lines {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                if !current.isEmpty {
+                    paragraphs.append(current)
+                    current = ""
+                }
+                continue
+            }
+
+            if current.isEmpty {
+                current = trimmed
+            } else if isListItemStart(trimmed) || endsWithHardSentenceStopAndShort(current) {
+                paragraphs.append(current)
+                current = trimmed
+            } else {
+                if current.hasSuffix("-") && !current.hasSuffix("--"),
+                   let beforeHyphen = current.dropLast().last,
+                   beforeHyphen.isLetter && !isCJK(beforeHyphen),
+                   let nextFirst = trimmed.first, nextFirst.isLowercase {
+                    current.removeLast()
+                    current.append(trimmed)
+                } else {
+                    if needSpace(between: current, and: trimmed) {
+                        current.append(" ")
+                    }
+                    current.append(trimmed)
+                }
+            }
+        }
+        if !current.isEmpty {
+            paragraphs.append(current)
+        }
+        return stripCJKSpaces(paragraphs.joined(separator: "\n\n"))
+    }
+
+    private static func isListItemStart(_ s: String) -> Bool {
+        let bullets: [Character] = ["•", "·", "-", "*", "—", "▪", "▸"]
+        if let first = s.first, bullets.contains(first) {
+            return true
+        }
+        // e.g. "1. ", "2) ", "(1)"
+        if s.range(of: #"^(\(?\d+[\.\)、\)]|[一二三四五六七八九十]+[、\.])\s*"#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
+    }
+
+    private static func endsWithHardSentenceStopAndShort(_ s: String) -> Bool {
+        false
     }
 
     public static func stripCJKSpaces(_ src: String) -> String {
@@ -92,13 +181,27 @@ public enum OCRLinesJoiner {
 
 public enum LocalVisionOCR {
     public static func recognize(cgImage: CGImage, languagePreference: String = "auto") throws -> String {
+        let detailed = try recognizeDetailed(
+            cgImage: cgImage,
+            languagePreference: languagePreference,
+            detectBarcodes: false
+        )
+        return detailed.rawText
+    }
+
+    public static func recognizeDetailed(
+        cgImage: CGImage,
+        languagePreference: String = "auto",
+        detectBarcodes: Bool = true
+    ) throws -> OCRRecognitionResult {
         let width = Double(cgImage.width)
         let height = Double(cgImage.height)
 
         var collectedSegments: [OCRTextSegment] = []
         var capturedError: Error?
+        var detectedPayloads: [String] = []
 
-        let request = VNRecognizeTextRequest { req, err in
+        let textRequest = VNRecognizeTextRequest { req, err in
             if let err {
                 capturedError = err
                 return
@@ -116,29 +219,52 @@ public enum LocalVisionOCR {
                 collectedSegments.append(OCRTextSegment(left: left, top: top, bottom: bottom, words: [str]))
             }
         }
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
+        textRequest.recognitionLevel = .accurate
+        textRequest.usesLanguageCorrection = true
 
         if languagePreference == "auto" || languagePreference.isEmpty {
-            request.automaticallyDetectsLanguage = true
-            request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
+            textRequest.automaticallyDetectsLanguage = true
+            textRequest.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
         } else {
-            request.automaticallyDetectsLanguage = false
+            textRequest.automaticallyDetectsLanguage = false
             switch languagePreference {
             case "zh-Hans":
-                request.recognitionLanguages = ["zh-Hans", "en-US"]
+                textRequest.recognitionLanguages = ["zh-Hans", "en-US"]
             case "zh-Hant":
-                request.recognitionLanguages = ["zh-Hant", "en-US"]
+                textRequest.recognitionLanguages = ["zh-Hant", "en-US"]
             default:
-                request.recognitionLanguages = [languagePreference, "en-US"]
+                textRequest.recognitionLanguages = [languagePreference, "en-US"]
             }
         }
 
+        var requests: [VNRequest] = [textRequest]
+
+        if detectBarcodes {
+            let barcodeRequest = VNDetectBarcodesRequest { req, _ in
+                guard let results = req.results as? [VNBarcodeObservation] else { return }
+                for item in results {
+                    if let payload = item.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !payload.isEmpty,
+                       !detectedPayloads.contains(payload) {
+                        detectedPayloads.append(payload)
+                    }
+                }
+            }
+            requests.append(barcodeRequest)
+        }
+
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        try handler.perform([request])
+        try handler.perform(requests)
         if let capturedError {
             throw capturedError
         }
-        return OCRLinesJoiner.joinSegments(collectedSegments)
+
+        let rawText = OCRLinesJoiner.joinSegments(collectedSegments)
+        let paragraphText = OCRLinesJoiner.mergeWrappedParagraphs(rawText)
+        return OCRRecognitionResult(
+            rawText: rawText,
+            paragraphText: paragraphText,
+            barcodes: detectedPayloads
+        )
     }
 }

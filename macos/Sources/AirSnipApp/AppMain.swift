@@ -33,9 +33,23 @@ public final class AirSnipAppController: NSObject, ObservableObject {
         pinManager.onRequestAnnotatePin = { [weak self] pin in
             self?.startPinInlineEditSession(pin: pin)
         }
+        pinManager.onRequestOCRPin = { [weak self] pin in
+            guard let self else { return }
+            let f = pin.window.frame
+            let anchor = NSPoint(x: f.midX, y: f.midY)
+            self.ocrBubbleManager.recognizeAndPresent(
+                rawSelectionImage: pin.cgImage,
+                anchorScreenPoint: anchor,
+                config: self.config
+            )
+        }
 
-        ocrBubbleManager.onAutoCopyChanged = { [weak self] autoCopy in
-            self?.updateConfig { $0.ocr.autoCopy = autoCopy }
+        ocrBubbleManager.onConfigChanged = { [weak self] lang, autoCopy, mergeBreaks in
+            self?.updateConfig {
+                $0.ocr.language = lang
+                $0.ocr.autoCopy = autoCopy
+                $0.ocr.mergeLineBreaks = mergeBreaks
+            }
         }
 
         hotkeyManager.onTrigger = { [weak self] action in
@@ -43,6 +57,8 @@ public final class AirSnipAppController: NSObject, ObservableObject {
             switch action {
             case .screenshot:
                 self.triggerCapture()
+            case .ocrCapture:
+                self.triggerDirectOCRCapture()
             case .pin:
                 self.triggerGlobalPinFromClipboard()
             case .pinBorderToggle:
@@ -134,10 +150,25 @@ public final class AirSnipAppController: NSObject, ObservableObject {
         capItem.target = self
         menu.addItem(capItem)
 
+        let ocrCapHint = config.hotkeys.ocrCapture.isUnbound ? "" : " (\(config.hotkeys.ocrCapture.displayString))"
+        let ocrCapItem = NSMenuItem(title: "截图文字识别\(ocrCapHint)", action: #selector(menuDirectOCRCapture), keyEquivalent: "")
+        ocrCapItem.target = self
+        menu.addItem(ocrCapItem)
+
         let pinHint = config.hotkeys.pin.isUnbound ? "" : " (\(config.hotkeys.pin.displayString))"
         let pinItem = NSMenuItem(title: "从剪贴板贴图\(pinHint)", action: #selector(menuPinClipboard), keyEquivalent: "")
         pinItem.target = self
         menu.addItem(pinItem)
+
+        menu.addItem(.separator())
+
+        let ocrClipItem = NSMenuItem(title: "从剪贴板识别文字", action: #selector(menuOCRClipboard), keyEquivalent: "")
+        ocrClipItem.target = self
+        menu.addItem(ocrClipItem)
+
+        let ocrFileItem = NSMenuItem(title: "从图片文件识别文字…", action: #selector(menuOCRFile), keyEquivalent: "")
+        ocrFileItem.target = self
+        menu.addItem(ocrFileItem)
 
         if pinManager.count > 0 {
             menu.addItem(.separator())
@@ -165,7 +196,10 @@ public final class AirSnipAppController: NSObject, ObservableObject {
     }
 
     @objc private func menuCapture() { triggerCapture() }
+    @objc private func menuDirectOCRCapture() { triggerDirectOCRCapture() }
     @objc private func menuPinClipboard() { triggerGlobalPinFromClipboard() }
+    @objc private func menuOCRClipboard() { triggerOCRFromClipboard() }
+    @objc private func menuOCRFile() { triggerOCRFromFile() }
     @objc private func menuRestoreClickThrough() { pinManager.restoreAllClickThrough() }
     @objc private func menuCloseAllPins() { pinManager.closeAll() }
     @objc private func menuSettings() { openSettings() }
@@ -202,6 +236,14 @@ public final class AirSnipAppController: NSObject, ObservableObject {
     }
 
     public func triggerCapture() {
+        startScreenCaptureOverlay(mode: .normalCapture)
+    }
+
+    public func triggerDirectOCRCapture() {
+        startScreenCaptureOverlay(mode: .directOCRCapture)
+    }
+
+    private func startScreenCaptureOverlay(mode: CaptureSessionCoordinator.SessionMode) {
         guard activeCaptureSession == nil, activeLongshotSession == nil else { return }
 
         if !ScreenCaptureService.hasScreenCapturePermission() {
@@ -217,13 +259,36 @@ public final class AirSnipAppController: NSObject, ObservableObject {
             do {
                 let snapshots = try await ScreenCaptureService.captureAllDisplays()
                 guard !snapshots.isEmpty else { return }
-                let coordinator = self.makeSessionCoordinator(mode: .normalCapture)
+                let coordinator = self.makeSessionCoordinator(mode: mode)
                 self.activeCaptureSession = coordinator
                 coordinator.startWithSnapshots(snapshots)
             } catch {
                 ScreenCaptureService.showPermissionGuidanceAlert()
             }
         }
+    }
+
+    public func triggerOCRFromClipboard() {
+        guard let clip = OutputService.readImageFromClipboard() else {
+            ToastHUD.show("剪贴板中当前没有可识别的图片")
+            return
+        }
+        ocrBubbleManager.recognizeAndPresent(
+            rawSelectionImage: clip.cgImage,
+            anchorScreenPoint: nil,
+            config: config
+        )
+    }
+
+    public func triggerOCRFromFile() {
+        guard let cg = OutputService.readImageFromFileDialog() else {
+            return
+        }
+        ocrBubbleManager.recognizeAndPresent(
+            rawSelectionImage: cg,
+            anchorScreenPoint: nil,
+            config: config
+        )
     }
 
     public func triggerGlobalPinFromClipboard() {
@@ -336,6 +401,15 @@ public final class AirSnipAppController: NSObject, ObservableObject {
         ls.onFinishEdit = { [weak self] cgImg, scale, scr in
             self?.activeLongshotSession = nil
             self?.startStandaloneAnnotateSession(image: cgImg, scale: scale, screen: scr)
+        }
+        ls.onFinishOCR = { [weak self] cgImg in
+            guard let self else { return }
+            self.activeLongshotSession = nil
+            self.ocrBubbleManager.recognizeAndPresent(
+                rawSelectionImage: cgImg,
+                anchorScreenPoint: nil,
+                config: self.config
+            )
         }
         ls.onCancel = { [weak self] in
             self?.activeLongshotSession = nil

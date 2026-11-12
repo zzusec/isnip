@@ -34,6 +34,7 @@ public final class LongshotSessionController: ObservableObject {
     public var onFinishCopy: ((CGImage, Double) -> Void)?
     public var onFinishSave: ((CGImage, Double) -> Void)?
     public var onFinishEdit: ((CGImage, Double, NSScreen) -> Void)?
+    public var onFinishOCR: ((CGImage) -> Void)?
     public var onCancel: (() -> Void)?
 
     public init(
@@ -145,7 +146,7 @@ public final class LongshotSessionController: ObservableObject {
         }
 
         // 3. Control bar window below (or above) viewport
-        let barW: CGFloat = 540
+        let barW: CGFloat = 596
         let barH: CGFloat = 52
         let barX = max(sFrame.minX + 12, min(sFrame.maxX - barW - 12, vpAppKit.midX - barW * 0.5))
         let barY: CGFloat = (vpAppKit.minY - barH - 12 >= sFrame.minY + 8)
@@ -185,6 +186,9 @@ public final class LongshotSessionController: ObservableObject {
                 return true
             case kVK_ANSI_S where cmdOrCtrl:
                 self.finishAndSave()
+                return true
+            case kVK_ANSI_T where !cmdOrCtrl:
+                self.finishAndOCR()
                 return true
             default:
                 return false
@@ -287,6 +291,15 @@ public final class LongshotSessionController: ObservableObject {
         let scr = screen
         stopAndCleanup()
         onFinishEdit?(cg, scale, scr)
+    }
+
+    public func finishAndOCR() {
+        guard let cg = canvas?.exportBuffer()?.makeCGImage() else {
+            cancel()
+            return
+        }
+        stopAndCleanup()
+        onFinishOCR?(cg)
     }
 
     public func cancel() {
@@ -402,6 +415,13 @@ private struct LongshotControlBarView: View {
             .controlSize(.small)
             .disabled(!controller.canUndo)
             .help("撤销最后一段 (⌘Z)")
+
+            Button("OCR") {
+                controller.finishAndOCR()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("完成拼接并直接识别长图文字 (T)")
 
             Button("标注") {
                 controller.finishAndAnnotate()

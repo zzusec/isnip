@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import CoreImage
 import ImageIO
 import AirSnipCore
 
@@ -131,9 +132,9 @@ public enum SmokeTestRunner {
                 return false
             }
 
-            print("[smoke] 5/5 验证本地离线 Vision OCR 中英文识别...")
-            let ocrW = 520
-            let ocrH = 140
+            print("[smoke] 5/5 验证本地离线 Vision OCR 中英文识别与二维码解析...")
+            let ocrW = 680
+            let ocrH = 180
             guard let ocrCtx = CGContext(
                 data: nil,
                 width: ocrW,
@@ -154,13 +155,34 @@ public enum SmokeTestRunner {
                 .font: NSFont.systemFont(ofSize: 34, weight: .bold),
                 .foregroundColor: NSColor.black
             ]
-            ("轻截 AirSnip 2026" as NSString).draw(at: NSPoint(x: 28, y: 50), withAttributes: attrs)
+            ("轻截 AirSnip 2026" as NSString).draw(at: NSPoint(x: 28, y: 65), withAttributes: attrs)
             NSGraphicsContext.restoreGraphicsState()
 
+            if let qrFilter = CIFilter(name: "CIQRCodeGenerator") {
+                qrFilter.setValue(Data("https://github.com/zzusec/airsnip-releases".utf8), forKey: "inputMessage")
+                qrFilter.setValue("M", forKey: "inputCorrectionLevel")
+                if let ciOut = qrFilter.outputImage {
+                    let scaled = ciOut.transformed(by: CGAffineTransform(scaleX: 4, y: 4))
+                    let ciCtx = CIContext(options: nil)
+                    if let qrCG = ciCtx.createCGImage(scaled, from: scaled.extent) {
+                        ocrCtx.interpolationQuality = .none
+                        ocrCtx.draw(qrCG, in: CGRect(x: 510, y: 20, width: 140, height: 140))
+                    }
+                }
+            }
+
             if let ocrImg = ocrCtx.makeImage() {
-                let recognized = try LocalVisionOCR.recognize(cgImage: ocrImg, languagePreference: "zh-Hans")
-                guard recognized.contains("AirSnip") else {
-                    fputs("FAIL: LocalVisionOCR output missing expected text: \(recognized)\n", stderr)
+                let detailed = try LocalVisionOCR.recognizeDetailed(
+                    cgImage: ocrImg,
+                    languagePreference: "zh-Hans",
+                    detectBarcodes: true
+                )
+                guard detailed.rawText.contains("AirSnip") else {
+                    fputs("FAIL: LocalVisionOCR output missing expected text: \(detailed.rawText)\n", stderr)
+                    return false
+                }
+                guard detailed.barcodes.contains("https://github.com/zzusec/airsnip-releases") else {
+                    fputs("FAIL: LocalVisionOCR barcode missing expected payload: \(detailed.barcodes)\n", stderr)
                     return false
                 }
             }

@@ -1,6 +1,7 @@
 import AppKit
 import Carbon
 import CoreGraphics
+import ImageIO
 import ScreenCaptureKit
 import ServiceManagement
 import UniformTypeIdentifiers
@@ -213,6 +214,33 @@ public enum OutputService {
         return (cg, ptSize)
     }
 
+    public static func readImageFromFileDialog() -> CGImage? {
+        NSApp.activate(ignoringOtherApps: true)
+        let panel = NSOpenPanel()
+        panel.title = "选择要识别文字的图片"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image]
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return nil
+        }
+        if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+           let cg = CGImageSourceCreateImageAtIndex(src, 0, nil),
+           cg.width > 0 && cg.height > 0 {
+            return cg
+        }
+        if let nsImg = NSImage(contentsOf: url) {
+            var rect = NSRect(origin: .zero, size: nsImg.size)
+            if let cg = nsImg.cgImage(forProposedRect: &rect, context: nil, hints: nil) {
+                return cg
+            }
+        }
+        ToastHUD.show("无法读取该图片文件")
+        return nil
+    }
+
     public static func presentSaveDialog(
         for cgImage: CGImage,
         config: inout AirSnipConfig,
@@ -310,6 +338,7 @@ public final class GlobalHotkeyManager {
         case screenshot = 1
         case pin = 2
         case pinBorderToggle = 3
+        case ocrCapture = 4
     }
 
     private var eventHandlerRef: EventHandlerRef?
@@ -359,6 +388,7 @@ public final class GlobalHotkeyManager {
 
         let items: [(Action, String, HotkeyBinding)] = [
             (.screenshot, "截图", hotkeys.screenshot),
+            (.ocrCapture, "截图 OCR 识别", hotkeys.ocrCapture),
             (.pin, "贴图", hotkeys.pin),
             (.pinBorderToggle, "贴图边框开关", hotkeys.pinBorderToggle),
         ]
