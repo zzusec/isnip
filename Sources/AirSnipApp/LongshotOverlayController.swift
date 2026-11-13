@@ -23,9 +23,8 @@ public final class LongshotSessionController: ObservableObject {
     @Published public private(set) var pixelHeight: Int = 0
     @Published public private(set) var segmentCount: Int = 0
     @Published public private(set) var canUndo: Bool = false
-    @Published public private(set) var statusHint: String = "Space 自动翻页 · 滚轮手动拼接 · Enter 保存"
+    @Published public private(set) var statusHint: String = ""
     @Published public private(set) var thumbnailImage: CGImage?
-    @Published public private(set) var headerFooterHint: String?
     @Published public private(set) var isAutoScrolling: Bool = false
     @Published public private(set) var needsAccessibilityAuth: Bool = false
     @Published public private(set) var reachedBottom: Bool = false
@@ -99,7 +98,7 @@ public final class LongshotSessionController: ObservableObject {
             } else {
                 needsAccessibilityAuth = true
                 _ = AccessibilityService.requestPermissionPrompt()
-                statusHint = "授权辅助功能可自动翻页（也可直接手动滚动）"
+                statusHint = "需辅助功能权限"
             }
         }
         startSessionLoop()
@@ -134,7 +133,7 @@ public final class LongshotSessionController: ObservableObject {
             needsAccessibilityAuth = true
             isAutoScrolling = false
             _ = AccessibilityService.requestPermissionPrompt()
-            statusHint = "请在系统设置中开启辅助功能以自动翻页"
+            statusHint = "需辅助功能权限"
             return
         }
         needsAccessibilityAuth = false
@@ -146,20 +145,12 @@ public final class LongshotSessionController: ObservableObject {
         pendingInitialDelayMs = initialDelayMs
         pendingInitialWarp = true
         isAutoScrolling = true
-        statusHint = segmentCount > 0
-            ? "自动翻页中（已拼 \(segmentCount) 段）· Space 暂停 · Enter 保存"
-            : "自动翻页中 · Space 暂停 · Enter 保存"
+        statusHint = ""
     }
 
     public func pauseAutoScrolling(customHint: String? = nil) {
         isAutoScrolling = false
-        if let customHint {
-            statusHint = customHint
-        } else if segmentCount > 0 {
-            statusHint = "已暂停（\(segmentCount) 段）· Space 继续 · Enter 保存"
-        } else {
-            statusHint = "已暂停 · Space 自动翻页或手动滚轮"
-        }
+        statusHint = customHint ?? ""
     }
 
     public func setScrollSpeed(_ speed: LongshotScrollSpeed) {
@@ -249,8 +240,8 @@ public final class LongshotSessionController: ObservableObject {
 
         // 3. Control bar window below (or above / cleanly inside bottom of) viewport, always respecting Dock & menu bar
         let vis = screen.visibleFrame
-        let barW = min(max(560, vis.width - 24), 720)
-        let barH: CGFloat = 54
+        let barW = min(max(488, vis.width - 24), 532)
+        let barH: CGFloat = 42
         let barX = max(vis.minX + 12, min(vis.maxX - barW - 12, vpAppKit.midX - barW * 0.5))
         let barY: CGFloat
         if vpAppKit.minY - barH - 10 >= vis.minY + 6 {
@@ -370,7 +361,7 @@ public final class LongshotSessionController: ObservableObject {
             guard userTouchedTrackpad || userRolledDiscreteWheel else { return }
             Task { @MainActor [weak self] in
                 guard let self, self.isAutoScrolling else { return }
-                self.pauseAutoScrolling(customHint: "手动滚动拼接中 · Space 继续翻页 · Enter 保存")
+                self.pauseAutoScrolling()
             }
         }
     }
@@ -393,7 +384,7 @@ public final class LongshotSessionController: ObservableObject {
                     if self.autoStartRequested && self.segmentCount == 0 && !self.isAutoScrolling {
                         self.beginAutoScrolling(initialDelayMs: 120)
                     } else if !self.isAutoScrolling {
-                        self.statusHint = "辅助功能已就绪 · Space 自动翻页"
+                        self.statusHint = ""
                     }
                 }
 
@@ -517,7 +508,7 @@ public final class LongshotSessionController: ObservableObject {
             if goodStepStreak >= 2 {
                 adaptiveScale = 1.0
             }
-            statusHint = "自动翻页中（已拼 \(segmentCount) 段）· Space 暂停 · Enter 保存"
+            statusHint = ""
 
         case .still:
             consecutiveStillCount += 1
@@ -532,28 +523,22 @@ public final class LongshotSessionController: ObservableObject {
             let stopThreshold = segmentCount > 0 ? 3 : 4
             if consecutiveStillCount >= stopThreshold {
                 isAutoScrolling = false
-                if segmentCount > 0 {
-                    reachedBottom = true
-                    statusHint = "已自动到底（共 \(segmentCount) 段）· Enter 保存"
-                } else {
-                    statusHint = "页面已到底或不可滚动 · Enter 保存"
-                }
+                reachedBottom = segmentCount > 0
+                statusHint = "已到底"
             }
 
         case .failed:
             goodStepStreak = 0
             if !wasSettleRetry {
                 pendingSettleRecapture = true
-                statusHint = "等待页面渲染对齐 · Space 暂停"
             } else {
                 adaptiveScale = max(0.45, adaptiveScale * 0.65)
-                statusHint = "正在自适应调速拼接 · Space 暂停"
             }
 
         case .limitReached:
             isAutoScrolling = false
             pendingSettleRecapture = false
-            statusHint = "已达高度上限 · Enter 保存"
+            statusHint = "已达上限"
         }
     }
 
@@ -568,21 +553,18 @@ public final class LongshotSessionController: ObservableObject {
             canUndo = canvas.canUndo
             reachedBottom = false
             if !fromAutoScroll {
-                statusHint = "已拼接 \(segmentCount) 段 · Enter 保存"
-            }
-            if canvas.headerHeight > 0 || canvas.footerHeight > 0 {
-                headerFooterHint = "已去页眉页脚"
+                statusHint = ""
             }
             thumbnailImage = canvas.makeThumbnail(maxWidth: 160, maxHeight: 420)
         case .still:
             break
         case .failed:
             if !fromAutoScroll {
-                statusHint = "滚动过快，请慢速滚动（⌘Z 撤销）"
+                statusHint = "滚动过快"
             }
         case .limitReached:
             if !fromAutoScroll {
-                statusHint = "已达高度上限 · Enter 保存"
+                statusHint = "已达上限"
             }
         }
         return step
@@ -598,7 +580,7 @@ public final class LongshotSessionController: ObservableObject {
         segmentCount = canvas.segmentCount
         canUndo = canvas.canUndo
         thumbnailImage = canvas.makeThumbnail(maxWidth: 160, maxHeight: 420)
-        statusHint = "已撤销上一段 · Space 继续翻页"
+        statusHint = ""
     }
 
     private func currentOwnWindowIDs() -> Set<Int> {
@@ -725,42 +707,76 @@ private struct LongshotPreviewCard: View {
     @ObservedObject var controller: LongshotSessionController
 
     var body: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(controller.isAutoScrolling ? Color.accentColor : Color.green)
-                    .frame(width: 6, height: 6)
-                Text(controller.isAutoScrolling ? "自动拼接" : "预览")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 0)
-
+        ZStack {
             if let cg = controller.thumbnailImage {
                 Image(decorative: cg, scale: 1.0)
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .strokeBorder(Color.accentColor.opacity(0.55), lineWidth: 1)
                     )
             }
-
-            Text("\(controller.pixelWidth) × \(controller.pixelHeight) px")
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.secondary)
         }
-        .padding(8)
+        .padding(7)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.14), lineWidth: 1)
         )
+    }
+}
+
+private struct LongshotBarPillStyle: ButtonStyle {
+    var role: Role = .secondary
+    @Environment(\.isEnabled) private var isEnabled
+
+    enum Role {
+        case secondary
+        case activeTint
+        case warning
+        case primary
+    }
+
+    func makeBody(configuration: Configuration) -> some View {
+        let bg: Color = {
+            switch role {
+            case .primary:
+                return Color.accentColor.opacity(configuration.isPressed ? 0.84 : 1.0)
+            case .activeTint:
+                return Color.accentColor.opacity(configuration.isPressed ? 0.24 : 0.15)
+            case .warning:
+                return Color.orange.opacity(configuration.isPressed ? 0.26 : 0.16)
+            case .secondary:
+                return Color.primary.opacity(configuration.isPressed ? 0.15 : 0.08)
+            }
+        }()
+        let fg: Color = {
+            switch role {
+            case .primary:
+                return .white
+            case .activeTint:
+                return .accentColor
+            case .warning:
+                return .orange
+            case .secondary:
+                return .primary
+            }
+        }()
+        configuration.label
+            .font(.system(size: 11.5, weight: role == .primary ? .semibold : .medium))
+            .foregroundStyle(fg)
+            .padding(.horizontal, 8.5)
+            .frame(height: 24)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(bg)
+            )
+            .opacity(isEnabled ? 1.0 : 0.38)
     }
 }
 
@@ -782,43 +798,40 @@ struct LongshotControlBarView: View {
             return "暂停"
         }
         if controller.segmentCount > 0 && !controller.reachedBottom {
-            return "继续翻页"
+            return "继续"
         }
         return "自动翻页"
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusDotColor)
-                        .frame(width: 7, height: 7)
-                    Text("\(controller.pixelWidth) × \(controller.pixelHeight) px")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    if let hf = controller.headerFooterHint {
-                        Text(hf)
-                            .font(.system(size: 10))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(Color.accentColor.opacity(0.16)))
-                    }
-                }
-                Text(controller.statusHint)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+        HStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusDotColor)
+                    .frame(width: 7, height: 7)
+                Text("\(controller.pixelWidth) × \(controller.pixelHeight)")
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .monospacedDigit()
                     .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                if !controller.statusHint.isEmpty {
+                    Text(controller.statusHint)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
             }
 
-            Spacer(minLength: 4)
+            Spacer(minLength: 8)
 
             if controller.needsAccessibilityAuth {
                 Button("授权") {
                     controller.openAccessibilityAuthorization()
                 }
-                .buttonStyle(.bordered)
-                .tint(.orange)
-                .controlSize(.small)
+                .buttonStyle(LongshotBarPillStyle(role: .warning))
+                .fixedSize(horizontal: true, vertical: false)
                 .help("打开辅助功能权限设置")
             }
 
@@ -827,68 +840,74 @@ struct LongshotControlBarView: View {
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: controller.isAutoScrolling ? "pause.fill" : "play.fill")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 9.5, weight: .bold))
                     Text(autoScrollButtonLabel)
+                        .lineLimit(1)
                 }
             }
-            .buttonStyle(.bordered)
-            .tint(controller.isAutoScrolling ? .accentColor : nil)
-            .controlSize(.small)
+            .buttonStyle(LongshotBarPillStyle(role: controller.isAutoScrolling ? .activeTint : .secondary))
+            .fixedSize(horizontal: true, vertical: false)
             .help("自动翻页 / 暂停 (Space)")
 
             Button {
                 controller.cycleScrollSpeed()
             } label: {
                 Text(controller.scrollSpeed.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .frame(minWidth: 26)
+                    .lineLimit(1)
+                    .frame(minWidth: 24)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .buttonStyle(LongshotBarPillStyle())
+            .fixedSize(horizontal: true, vertical: false)
             .help("翻页速度：\(controller.scrollSpeed.title)（点击切换）")
 
             Divider()
-                .frame(height: 18)
+                .frame(height: 15)
+                .padding(.horizontal, 1)
 
             Button {
                 controller.undoLastSegment()
             } label: {
                 Image(systemName: "arrow.uturn.backward")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .buttonStyle(LongshotBarPillStyle())
             .disabled(!controller.canUndo)
             .help("撤销上一段 (⌘Z)")
 
             Button("OCR") {
                 controller.finishAndOCR()
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .buttonStyle(LongshotBarPillStyle())
+            .fixedSize(horizontal: true, vertical: false)
             .help("识字 (T)")
 
             Button("标注") {
                 controller.finishAndAnnotate()
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .buttonStyle(LongshotBarPillStyle())
+            .fixedSize(horizontal: true, vertical: false)
             .help("标注")
 
             Button("复制") {
                 controller.finishAndCopy()
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .buttonStyle(LongshotBarPillStyle())
+            .fixedSize(horizontal: true, vertical: false)
             .help("仅复制到剪贴板 (⌘C)")
 
-            Button("保存完成") {
+            Button {
                 let forceDialog = NSEvent.modifierFlags.contains(.option)
                 controller.finishAndSave(forceDialog: forceDialog)
+            } label: {
+                HStack(spacing: 3.5) {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                    Text("保存")
+                        .lineLimit(1)
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.accentColor)
-            .controlSize(.small)
+            .buttonStyle(LongshotBarPillStyle(role: .primary))
+            .fixedSize(horizontal: true, vertical: false)
             .help("保存到默认位置并复制（Enter / ⌘S，按住 ⌥ 另存为）")
 
             Button {
@@ -896,19 +915,21 @@ struct LongshotControlBarView: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 24)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 3)
             .help("取消 (Esc)")
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 7)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Color.primary.opacity(0.15), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.85)
         )
     }
 }

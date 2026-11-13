@@ -678,14 +678,15 @@ public enum OutputService {
             panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         }
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 344, height: 70))
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 368, height: 72))
 
         let fmtLabel = NSTextField(labelWithString: "格式：")
         fmtLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
         fmtLabel.alignment = .right
-        fmtLabel.frame = NSRect(x: 12, y: 40, width: 68, height: 20)
+        fmtLabel.lineBreakMode = .byClipping
+        fmtLabel.frame = NSRect(x: 12, y: 41, width: 82, height: 20)
 
-        let fmtPopup = NSPopUpButton(frame: NSRect(x: 84, y: 36, width: 124, height: 28), pullsDown: false)
+        let fmtPopup = NSPopUpButton(frame: NSRect(x: 100, y: 37, width: 132, height: 28), pullsDown: false)
         for fmt in ExportImageFormat.allCases {
             fmtPopup.addItem(withTitle: fmt.displayName)
         }
@@ -696,12 +697,13 @@ public enum OutputService {
         let compLabel = NSTextField(labelWithString: "无损压缩：")
         compLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
         compLabel.alignment = .right
-        compLabel.frame = NSRect(x: 12, y: 10, width: 68, height: 20)
+        compLabel.lineBreakMode = .byClipping
+        compLabel.frame = NSRect(x: 12, y: 11, width: 82, height: 20)
 
-        let compSwitch = NSSwitch(frame: NSRect(x: 86, y: 8, width: 42, height: 24))
+        let compSwitch = NSSwitch(frame: NSRect(x: 102, y: 9, width: 42, height: 24))
         compSwitch.state = chosenSmartCompress ? .on : .off
 
-        let qualityPopup = NSPopUpButton(frame: NSRect(x: 138, y: 6, width: 148, height: 28), pullsDown: false)
+        let qualityPopup = NSPopUpButton(frame: NSRect(x: 152, y: 7, width: 112, height: 28), pullsDown: false)
         for q in PngCompressionQualityPreset.allCases {
             qualityPopup.addItem(withTitle: q.shortTitle)
         }
@@ -1029,7 +1031,7 @@ public struct UpdateReleaseInfo: Sendable {
 
 public enum UpdateChecker {
     public static var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.1.0"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.3.12"
     }
 
     public static var releaseRepo: String {
@@ -1104,22 +1106,29 @@ public enum ToastHUD {
         dismissTask?.cancel()
         activeWindow?.orderOut(nil)
 
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 13.0, weight: .medium)
-        let textWidth = ceil((message as NSString).size(withAttributes: [.font: font]).width)
-        let w = max(168, textWidth + 56)
-        let h: CGFloat = 36
-
         let screen = NSScreen.main ?? NSScreen.screens.first
         let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 13.0, weight: .medium)
+        let rawTextWidth = ceil((message as NSString).size(withAttributes: [.font: font]).width)
+        let maxW = min(screenFrame.width - 48, 520)
+        let iconSide: CGFloat = 17
+        let iconGap: CGFloat = 7
+        let maxTextW = max(60, maxW - 30 - iconSide - iconGap)
+        let textWidth = min(rawTextWidth, maxTextW)
+        let groupW = iconSide + iconGap + textWidth
+        let w = min(maxW, max(124, ceil(groupW + 30)))
+        let h: CGFloat = 36
+
         let targetY = screenFrame.maxY - 58
         let startFrame = NSRect(
-            x: screenFrame.midX - w * 0.5,
+            x: round(screenFrame.midX - w * 0.5),
             y: targetY + 6,
             width: w,
             height: h
         )
         let finalFrame = NSRect(
-            x: screenFrame.midX - w * 0.5,
+            x: round(screenFrame.midX - w * 0.5),
             y: targetY,
             width: w,
             height: h
@@ -1152,11 +1161,12 @@ public enum ToastHUD {
         visual.layer?.borderWidth = 0.8
         visual.layer?.borderColor = NSColor(calibratedWhite: 1.0, alpha: 0.16).cgColor
 
-        let symCfg = NSImage.SymbolConfiguration(pointSize: 14.5, weight: .semibold)
+        let groupStartX = round((w - groupW) * 0.5)
+        let symCfg = NSImage.SymbolConfiguration(pointSize: 14.0, weight: .semibold)
             .applying(NSImage.SymbolConfiguration(paletteColors: [tint]))
         if let symImg = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(symCfg) {
             let iconView = NSImageView(image: symImg)
-            iconView.frame = NSRect(x: 14, y: (h - 18) * 0.5, width: 18, height: 18)
+            iconView.frame = NSRect(x: groupStartX, y: round((h - iconSide) * 0.5), width: iconSide, height: iconSide)
             visual.addSubview(iconView)
         }
 
@@ -1164,7 +1174,14 @@ public enum ToastHUD {
         label.font = font
         label.textColor = NSColor(calibratedWhite: 0.98, alpha: 0.96)
         label.alignment = .left
-        label.frame = NSRect(x: 37, y: (h - 19) * 0.5, width: w - 51, height: 19)
+        label.lineBreakMode = .byTruncatingMiddle
+        label.maximumNumberOfLines = 1
+        label.frame = NSRect(
+            x: groupStartX + iconSide + iconGap,
+            y: round((h - 19) * 0.5),
+            width: textWidth + 2,
+            height: 19
+        )
         visual.addSubview(label)
 
         panel.contentView = visual

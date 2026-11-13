@@ -22,7 +22,7 @@ public final class SettingsWindowController {
         }
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 740, height: 560),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -140,7 +140,7 @@ public struct SettingsRootView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Spacer().frame(height: 24)
 
-                HStack(spacing: 9) {
+                HStack(spacing: 8) {
                     Image(nsImage: NSApp.applicationIconImage)
                         .resizable()
                         .interpolation(.high)
@@ -149,15 +149,21 @@ public struct SettingsRootView: View {
 
                     Text("iSnip")
                         .font(.system(size: 14.5, weight: .bold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
 
                     Text("v\(UpdateChecker.currentVersion)")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(Capsule().fill(Color.primary.opacity(0.07)))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.primary.opacity(0.075)))
+
+                    Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 9)
+                .padding(.horizontal, 7)
                 .padding(.bottom, 12)
 
                 ForEach(SettingsTab.allCases) { tab in
@@ -204,16 +210,16 @@ public struct SettingsRootView: View {
 
                 Spacer()
             }
-            .padding(13)
-            .frame(width: 176)
+            .padding(12)
+            .frame(width: 192)
             .background(SidebarVisualEffectView())
 
             Rectangle()
-                .fill(Color.primary.opacity(0.09))
+                .fill(Color(nsColor: .separatorColor))
                 .frame(width: 1)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 16) {
                     switch selectedTab {
                     case .general:
                         GeneralSettingsPane(app: app)
@@ -231,14 +237,14 @@ public struct SettingsRootView: View {
                         AboutSettingsPane(app: app)
                     }
                 }
-                .padding(.horizontal, 26)
-                .padding(.top, 26)
-                .padding(.bottom, 24)
+                .padding(.horizontal, 24)
+                .padding(.top, 24)
+                .padding(.bottom, 22)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(Color(nsColor: .windowBackgroundColor))
         }
-        .frame(width: 720, height: 520)
+        .frame(width: 740, height: 560)
     }
 }
 
@@ -376,7 +382,7 @@ private struct GeneralSettingsPane: View {
     @State private var hasAccessibility = AccessibilityService.hasPermission()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             SettingsPageHeader("通用")
 
             SettingsSectionCard("常规") {
@@ -422,25 +428,13 @@ private struct GeneralSettingsPane: View {
                         }
                     }
                     .labelsHidden()
-                    .frame(width: 100)
+                    .frame(width: 108)
                 }
-            }
-
-            SettingsSectionCard("偏好") {
-                SettingsSwitchRow(
-                    title: "无损压缩",
-                    subtitle: "自动压缩保存与复制的 PNG",
-                    isOn: Binding(
-                        get: { app.config.smartPngCompression },
-                        set: { v in app.updateConfig { $0.smartPngCompression = v } }
-                    )
-                )
 
                 SettingsRowDivider()
 
                 SettingsSwitchRow(
-                    title: "防误触退出",
-                    subtitle: "有标注时连按两次 Esc 退出",
+                    title: "有标注时按两次 Esc 退出",
                     isOn: Binding(
                         get: { app.config.confirmCancel },
                         set: { v in app.updateConfig { $0.confirmCancel = v } }
@@ -459,17 +453,17 @@ private struct GeneralSettingsPane: View {
             }
 
             SettingsSectionCard("权限") {
-                SettingsControlRow(
-                    title: "屏幕录制",
-                    subtitle: hasScreenCapture ? nil : "用于截取屏幕画面"
-                ) {
+                SettingsControlRow(title: "屏幕录制") {
                     if hasScreenCapture {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 11.5, weight: .semibold))
                                 .foregroundStyle(.green)
                             Text("已授权")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.green)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .padding(.horizontal, 9)
                         .padding(.vertical, 3.5)
@@ -491,17 +485,17 @@ private struct GeneralSettingsPane: View {
 
                 SettingsRowDivider()
 
-                SettingsControlRow(
-                    title: "辅助功能",
-                    subtitle: hasAccessibility ? nil : "用于页面长截图自动翻页"
-                ) {
+                SettingsControlRow(title: "辅助功能") {
                     if hasAccessibility {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 11.5, weight: .semibold))
                                 .foregroundStyle(.green)
                             Text("已授权")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.green)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .padding(.horizontal, 9)
                         .padding(.vertical, 3.5)
@@ -546,7 +540,6 @@ private struct CaptureAndPinPane: View {
             SettingsSectionCard("PNG 压缩") {
                 SettingsSwitchRow(
                     title: "无损压缩",
-                    subtitle: "pngquant + oxipng",
                     isOn: Binding(
                         get: { app.config.smartPngCompression },
                         set: { v in app.updateConfig { $0.smartPngCompression = v } }
@@ -565,9 +558,11 @@ private struct CaptureAndPinPane: View {
                         }
                     }
                     .labelsHidden()
-                    .frame(width: 172)
+                    .pickerStyle(.segmented)
+                    .frame(width: 196)
                     .disabled(!app.config.smartPngCompression)
                 }
+                .opacity(app.config.smartPngCompression ? 1.0 : 0.5)
 
                 SettingsRowDivider()
 
@@ -580,21 +575,6 @@ private struct CaptureAndPinPane: View {
                 )
                 .disabled(!app.config.smartPngCompression)
                 .opacity(app.config.smartPngCompression ? 1.0 : 0.5)
-
-                if !PngSmartCompressor.hasBundledOrSystemTools {
-                    SettingsRowDivider()
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.orange)
-                        Text("未检测到压缩组件，已回退系统编码")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                }
             }
 
             SettingsSectionCard("保存与选区") {
@@ -649,7 +629,7 @@ private struct CaptureAndPinPane: View {
                         }
                     }
                     .labelsHidden()
-                    .frame(width: 108)
+                    .frame(width: 132)
                 }
 
                 SettingsRowDivider()
@@ -664,7 +644,7 @@ private struct CaptureAndPinPane: View {
                         }
                     }
                     .labelsHidden()
-                    .frame(width: 124)
+                    .frame(width: 132)
                 }
 
                 SettingsRowDivider()
@@ -711,21 +691,32 @@ private struct CaptureAndPinPane: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(width: 172)
+                    .disabled(!app.config.longshotAutoScroll)
                 }
+                .opacity(app.config.longshotAutoScroll ? 1.0 : 0.5)
 
                 SettingsRowDivider()
 
                 SettingsControlRow(title: "高度上限") {
-                    Stepper(
-                        "\(app.config.longshotMaxHeight) px",
-                        value: Binding(
-                            get: { app.config.longshotMaxHeight },
-                            set: { h in app.updateConfig { $0.longshotMaxHeight = h } }
-                        ),
-                        in: 5000...60000,
-                        step: 5000
-                    )
-                    .font(.system(size: 12.5, design: .monospaced))
+                    HStack(spacing: 8) {
+                        Text("\(app.config.longshotMaxHeight) px")
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+
+                        Stepper(
+                            "",
+                            value: Binding(
+                                get: { app.config.longshotMaxHeight },
+                                set: { h in app.updateConfig { $0.longshotMaxHeight = h } }
+                            ),
+                            in: 5000...60000,
+                            step: 5000
+                        )
+                        .labelsHidden()
+                    }
                 }
             }
 
@@ -757,16 +748,25 @@ private struct CaptureAndPinPane: View {
                 SettingsRowDivider()
 
                 SettingsControlRow(title: "数量上限") {
-                    Stepper(
-                        "\(app.config.pinMaxCount) 张",
-                        value: Binding(
-                            get: { app.config.pinMaxCount },
-                            set: { n in app.updateConfig { $0.pinMaxCount = n } }
-                        ),
-                        in: 5...50,
-                        step: 5
-                    )
-                    .font(.system(size: 12.5, design: .monospaced))
+                    HStack(spacing: 8) {
+                        Text("\(app.config.pinMaxCount) 张")
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+
+                        Stepper(
+                            "",
+                            value: Binding(
+                                get: { app.config.pinMaxCount },
+                                set: { n in app.updateConfig { $0.pinMaxCount = n } }
+                            ),
+                            in: 5...50,
+                            step: 5
+                        )
+                        .labelsHidden()
+                    }
                 }
             }
         }
@@ -781,7 +781,7 @@ private struct ToolbarVisibilityPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            SettingsPageHeader("工具栏", subtitle: "隐藏按钮不影响快捷键") {
+            SettingsPageHeader("工具栏") {
                 Button("全部显示") {
                     app.updateConfig { $0.toolbar.hidden.removeAll() }
                 }
@@ -808,10 +808,6 @@ private struct ToolbarVisibilityPane: View {
                             .buttonStyle(.plain)
 
                             Spacer()
-
-                            Text("\(app.config.toolbar.visibleCount(in: group))/\(group.slots.count)")
-                                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                .foregroundStyle(.secondary)
                         }
 
                         LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
@@ -860,7 +856,7 @@ private struct HotkeysSettingsPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            SettingsPageHeader("快捷键", subtitle: "点击键帽录制，支持鼠标中键与侧键") {
+            SettingsPageHeader("快捷键") {
                 Button("恢复默认") {
                     app.updateConfig {
                         $0.hotkeys = HotkeyConfig()
@@ -1065,8 +1061,25 @@ private struct EditorDefaultsPane: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            SettingsPageHeader("标注")
+        let clampedActiveIdx = max(0, min(app.config.swatchColors.count - 1, app.config.activeColorIndex))
+        let activeRGB = app.config.swatchColors[clampedActiveIdx]
+        let activeLum = (0.299 * Double(activeRGB.r) + 0.587 * Double(activeRGB.g) + 0.114 * Double(activeRGB.b)) / 255.0
+        let needsDarkPreview = activeLum > 0.80
+
+        VStack(alignment: .leading, spacing: 15) {
+            SettingsPageHeader("标注") {
+                Button("恢复默认") {
+                    app.updateConfig {
+                        $0.swatchColors = ColorPalette.defaultSwatches
+                        $0.activeColorIndex = 1
+                        $0.defaultLineWidth = 2.0
+                        $0.defaultBlurRadius = 16.0
+                        $0.defaultFontSize = 24.0
+                        $0.defaultFillEnabled = false
+                    }
+                }
+                .controlSize(.small)
+            }
 
             SettingsSectionCard("默认样式") {
                 HStack(spacing: 14) {
@@ -1078,16 +1091,16 @@ private struct EditorDefaultsPane: View {
                             get: { app.config.defaultLineWidth },
                             set: { v in app.updateConfig { $0.defaultLineWidth = v.rounded() } }
                         ),
-                        in: 1...20,
-                        step: 1
+                        in: 1...20
                     )
                     Text("\(Int(app.config.defaultLineWidth)) px")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .monospacedDigit()
                         .foregroundStyle(.secondary)
-                        .frame(width: 48, alignment: .trailing)
+                        .frame(width: 52, alignment: .trailing)
                 }
                 .padding(.horizontal, 14)
-                .padding(.vertical, 11)
+                .padding(.vertical, 10.5)
 
                 SettingsRowDivider()
 
@@ -1098,18 +1111,18 @@ private struct EditorDefaultsPane: View {
                     Slider(
                         value: Binding(
                             get: { app.config.defaultBlurRadius },
-                            set: { v in app.updateConfig { $0.defaultBlurRadius = v.rounded() } }
+                            set: { v in app.updateConfig { $0.defaultBlurRadius = (v / 2.0).rounded() * 2.0 } }
                         ),
-                        in: 4...48,
-                        step: 2
+                        in: 4...48
                     )
-                    Text("\(Int(app.config.defaultBlurRadius))")
+                    Text("\(Int(app.config.defaultBlurRadius)) px")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .monospacedDigit()
                         .foregroundStyle(.secondary)
-                        .frame(width: 48, alignment: .trailing)
+                        .frame(width: 52, alignment: .trailing)
                 }
                 .padding(.horizontal, 14)
-                .padding(.vertical, 11)
+                .padding(.vertical, 10.5)
 
                 SettingsRowDivider()
 
@@ -1120,18 +1133,19 @@ private struct EditorDefaultsPane: View {
                     Slider(
                         value: Binding(
                             get: { app.config.defaultFontSize },
-                            set: { v in app.updateConfig { $0.defaultFontSize = v.rounded() } }
+                            set: { v in app.updateConfig { $0.defaultFontSize = (v / 2.0).rounded() * 2.0 } }
                         ),
-                        in: 12...72,
-                        step: 2
+                        in: 12...72
                     )
                     Text("\(Int(app.config.defaultFontSize)) pt")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .monospacedDigit()
                         .foregroundStyle(.secondary)
-                        .frame(width: 48, alignment: .trailing)
+                        .frame(width: 52, alignment: .trailing)
                 }
                 .padding(.horizontal, 14)
-                .padding(.vertical, 11)
+                .padding(.vertical, 10.5)
+
                 SettingsRowDivider()
 
                 SettingsSwitchRow(
@@ -1144,88 +1158,98 @@ private struct EditorDefaultsPane: View {
             }
 
             SettingsSectionCard("预设颜色") {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 13) {
+                    HStack(spacing: 14) {
                         ForEach(0..<ColorPalette.swatchCount, id: \.self) { idx in
                             let c = idx < app.config.swatchColors.count ? app.config.swatchColors[idx] : ColorPalette.defaultSwatches[idx]
-                            let isActive = (app.config.activeColorIndex == idx)
+                            let isActive = (clampedActiveIdx == idx)
+                            let lum = (0.299 * Double(c.r) + 0.587 * Double(c.g) + 0.114 * Double(c.b)) / 255.0
 
-                            VStack(spacing: 6) {
-                                Button {
-                                    app.updateConfig { $0.activeColorIndex = idx }
-                                } label: {
+                            Button {
+                                app.updateConfig { $0.activeColorIndex = idx }
+                            } label: {
+                                ZStack {
                                     Circle()
                                         .fill(swiftUIColor(c))
                                         .frame(width: 26, height: 26)
+                                        .shadow(color: .black.opacity(0.10), radius: 1.5, x: 0, y: 1)
                                         .overlay(
                                             Circle()
-                                                .strokeBorder(Color.primary.opacity(0.20), lineWidth: 1)
+                                                .strokeBorder(Color.primary.opacity(lum > 0.80 ? 0.24 : 0.16), lineWidth: 1)
                                         )
                                         .overlay(
                                             Circle()
-                                                .strokeBorder(Color.accentColor, lineWidth: isActive ? 2.2 : 0)
+                                                .strokeBorder(Color.accentColor, lineWidth: isActive ? 2.0 : 0)
                                                 .padding(-3.5)
                                         )
-                                }
-                                .buttonStyle(.plain)
 
-                                ColorPicker("", selection: Binding(
-                                    get: { swiftUIColor(c) },
-                                    set: { newCol in
-                                        let ns = NSColor(newCol)
-                                        let rgba = rgbaFromNSColor(ns)
-                                        app.updateConfig {
-                                            if idx < $0.swatchColors.count {
-                                                $0.swatchColors[idx] = rgba
-                                            }
-                                            $0.activeColorIndex = idx
-                                        }
+                                    if isActive {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 10.5, weight: .bold))
+                                            .foregroundStyle(lum > 0.68 ? Color.black.opacity(0.78) : Color.white)
                                     }
-                                ), supportsOpacity: false)
-                                .labelsHidden()
-                                .scaleEffect(0.82)
+                                }
                             }
+                            .buttonStyle(.plain)
                         }
 
                         Spacer()
 
-                        Button("恢复默认") {
-                            app.updateConfig {
-                                $0.swatchColors = ColorPalette.defaultSwatches
-                                $0.activeColorIndex = 1
-                                $0.defaultLineWidth = 2.0
-                                $0.defaultFillEnabled = false
-                            }
+                        HStack(spacing: 8) {
+                            Text("自定义")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+
+                            ColorPicker("", selection: Binding(
+                                get: { swiftUIColor(activeRGB) },
+                                set: { newCol in
+                                    let ns = NSColor(newCol)
+                                    let rgba = rgbaFromNSColor(ns)
+                                    app.updateConfig {
+                                        if clampedActiveIdx < $0.swatchColors.count {
+                                            $0.swatchColors[clampedActiveIdx] = rgba
+                                        }
+                                    }
+                                }
+                            ), supportsOpacity: false)
+                            .labelsHidden()
                         }
-                        .controlSize(.small)
-                        .fixedSize()
                     }
 
-                    let activeRGB = app.config.swatchColors[max(0, min(app.config.swatchColors.count - 1, app.config.activeColorIndex))]
                     HStack(spacing: 16) {
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .strokeBorder(swiftUIColor(activeRGB), lineWidth: max(1.5, min(8, app.config.defaultLineWidth * 0.6)))
-                            .frame(width: 52, height: 28)
+                        Group {
+                            if app.config.defaultFillEnabled {
+                                RoundedRectangle(cornerRadius: 4.5, style: .continuous)
+                                    .fill(swiftUIColor(activeRGB))
+                            } else {
+                                RoundedRectangle(cornerRadius: 4.5, style: .continuous)
+                                    .strokeBorder(swiftUIColor(activeRGB), lineWidth: max(1.5, min(8, app.config.defaultLineWidth * 0.6)))
+                            }
+                        }
+                        .frame(width: 50, height: 26)
 
                         Capsule()
                             .fill(swiftUIColor(activeRGB))
                             .frame(width: 72, height: max(2, min(16, app.config.defaultLineWidth)))
 
                         Text("Aa 预览")
-                            .font(.system(size: max(12, min(24, app.config.defaultFontSize * 0.72)), weight: .semibold))
+                            .font(.system(size: max(12, min(22, app.config.defaultFontSize * 0.68)), weight: .semibold))
                             .foregroundStyle(swiftUIColor(activeRGB))
+                            .lineLimit(1)
 
                         Spacer()
-
-                        Text(activeRGB.hexString)
-                            .font(.system(size: 11.5, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 9.5)
                     .background(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.primary.opacity(0.04))
+                            .fill(needsDarkPreview ? Color(white: 0.18) : Color.primary.opacity(0.045))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.75)
                     )
                 }
                 .padding(14)
@@ -1317,16 +1341,6 @@ private struct OCRSettingsPane: View {
                 }
                 .padding(14)
             }
-
-            HStack(spacing: 6) {
-                Image(systemName: "lock.shield.fill")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.green)
-                Text("本地离线识别，图片不上传")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.leading, 4)
         }
     }
 }
@@ -1343,28 +1357,28 @@ private struct AboutSettingsPane: View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsPageHeader("关于")
 
-            HStack(spacing: 15) {
+            HStack(spacing: 14) {
                 Image(nsImage: NSApp.applicationIconImage)
                     .resizable()
                     .interpolation(.high)
-                    .frame(width: 60, height: 60)
-                    .shadow(color: .black.opacity(0.18), radius: 5, x: 0, y: 2.5)
+                    .frame(width: 52, height: 52)
+                    .shadow(color: .black.opacity(0.16), radius: 4, x: 0, y: 2)
 
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("iSnip")
-                            .font(.system(size: 20, weight: .bold))
-                        Text("v\(UpdateChecker.currentVersion)")
-                            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(Color.accentColor)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Color.accentColor.opacity(0.12)))
-                    }
-                    Text("截图标注 · 窗体截图 · 页面长截图 · 无损压缩 · 贴图 · 离线 OCR")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(.secondary)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("iSnip")
+                        .font(.system(size: 20, weight: .bold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Text("v\(UpdateChecker.currentVersion)")
+                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color.accentColor)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 7.5)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.12)))
                 }
+
                 Spacer()
             }
             .padding(16)
@@ -1379,7 +1393,7 @@ private struct AboutSettingsPane: View {
 
             SettingsSectionCard("更新") {
                 SettingsSwitchRow(
-                    title: "启动时自动检查更新",
+                    title: "自动检查更新",
                     isOn: Binding(
                         get: { app.config.autoCheckUpdate },
                         set: { v in app.updateConfig { $0.autoCheckUpdate = v } }
@@ -1389,11 +1403,13 @@ private struct AboutSettingsPane: View {
                 SettingsRowDivider()
 
                 HStack(spacing: 10) {
-                    Text(updateStatusText.isEmpty ? "当前版本 v\(UpdateChecker.currentVersion)" : updateStatusText)
-                        .font(.system(size: 13))
-                        .foregroundStyle(updateStatusText.isEmpty ? .secondary : .primary)
+                    Text(updateStatusText.isEmpty ? "版本检查" : updateStatusText)
+                        .font(.system(size: 13, weight: updateStatusText.isEmpty ? .medium : .regular))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
 
-                    Spacer()
+                    Spacer(minLength: 8)
 
                     if let rel = latestRelease {
                         Button("下载 v\(rel.version)") {
@@ -1401,6 +1417,7 @@ private struct AboutSettingsPane: View {
                         }
                         .controlSize(.small)
                         .buttonStyle(.borderedProminent)
+                        .fixedSize(horizontal: true, vertical: false)
                     }
 
                     Button(checkingUpdate ? "检查中…" : "检查更新") {
@@ -1432,7 +1449,7 @@ private struct AboutSettingsPane: View {
                 Text("GPL-3.0 ·")
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
-                Link("https://github.com/zzusec/isnip", destination: URL(string: "https://github.com/zzusec/isnip")!)
+                Link("GitHub", destination: URL(string: "https://github.com/zzusec/isnip")!)
                     .font(.system(size: 11.5))
             }
             .padding(.leading, 4)

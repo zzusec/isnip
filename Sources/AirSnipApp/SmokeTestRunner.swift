@@ -408,7 +408,7 @@ public enum SmokeTestRunner {
                     ]
                     for (tab, fileName) in tabsToDump {
                         let host = NSHostingView(rootView: SettingsRootView(app: dummyApp, initialTab: tab))
-                        host.frame = NSRect(x: 0, y: 0, width: 720, height: 520)
+                        host.frame = NSRect(x: 0, y: 0, width: 740, height: 560)
                         host.appearance = NSAppearance(named: .aqua)
                         host.layoutSubtreeIfNeeded()
                         if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
@@ -416,6 +416,30 @@ public enum SmokeTestRunner {
                             if let png = rep.representation(using: .png, properties: [:]) {
                                 try? png.write(to: dirURL.appendingPathComponent(fileName))
                             }
+                        }
+                    }
+
+                    // Dark appearance check + White (#FFFFFF) swatch preview contrast check
+                    let darkGeneralHost = NSHostingView(rootView: SettingsRootView(app: dummyApp, initialTab: .general))
+                    darkGeneralHost.frame = NSRect(x: 0, y: 0, width: 740, height: 560)
+                    darkGeneralHost.appearance = NSAppearance(named: .darkAqua)
+                    darkGeneralHost.layoutSubtreeIfNeeded()
+                    if let rep = darkGeneralHost.bitmapImageRepForCachingDisplay(in: darkGeneralHost.bounds) {
+                        darkGeneralHost.cacheDisplay(in: darkGeneralHost.bounds, to: rep)
+                        if let png = rep.representation(using: .png, properties: [:]) {
+                            try? png.write(to: dirURL.appendingPathComponent("01_general_dark.png"))
+                        }
+                    }
+
+                    dummyApp.updateConfig { $0.activeColorIndex = 0 } // #FFFFFF pure white swatch
+                    let whiteSwatchHost = NSHostingView(rootView: SettingsRootView(app: dummyApp, initialTab: .editor))
+                    whiteSwatchHost.frame = NSRect(x: 0, y: 0, width: 740, height: 560)
+                    whiteSwatchHost.appearance = NSAppearance(named: .aqua)
+                    whiteSwatchHost.layoutSubtreeIfNeeded()
+                    if let rep = whiteSwatchHost.bitmapImageRepForCachingDisplay(in: whiteSwatchHost.bounds) {
+                        whiteSwatchHost.cacheDisplay(in: whiteSwatchHost.bounds, to: rep)
+                        if let png = rep.representation(using: .png, properties: [:]) {
+                            try? png.write(to: dirURL.appendingPathComponent("05_editor_white_swatch.png"))
                         }
                     }
 
@@ -432,10 +456,10 @@ public enum SmokeTestRunner {
                             .padding(8)
                     }
                     let lsHost = NSHostingView(rootView: lsPreviewRoot)
-                    lsHost.frame = NSRect(x: 0, y: 0, width: 704, height: 70)
+                    lsHost.frame = NSRect(x: 0, y: 0, width: 548, height: 58)
                     lsHost.appearance = NSAppearance(named: .aqua)
                     let offWin = NSWindow(
-                        contentRect: NSRect(x: -4000, y: -4000, width: 704, height: 70),
+                        contentRect: NSRect(x: -4000, y: -4000, width: 548, height: 58),
                         styleMask: [.borderless],
                         backing: .buffered,
                         defer: false

@@ -227,12 +227,8 @@ public final class PinWindowController: NSObject {
 
     public func copyToClipboard() {
         let cfg = manager?.getConfig?()
-        OutputService.copyImageToClipboard(cgImage, backingScale: backingScale, config: cfg) { res in
-            if res.savedRatioPercent >= 3 {
-                ToastHUD.show("已复制 · \(res.compactBadgeSummary)")
-            } else {
-                ToastHUD.show("已复制")
-            }
+        OutputService.copyImageToClipboard(cgImage, backingScale: backingScale, config: cfg) { _ in
+            ToastHUD.show("已复制")
         }
     }
 
@@ -244,15 +240,11 @@ public final class PinWindowController: NSObject {
             backingScale: backingScale,
             config: &cfg,
             forceDialog: forceDialog,
-            parentWindow: window,
-            onFinalCompressed: { _, finalRes in
-                guard showToast else { return }
-                ToastHUD.show("已保存 · \(finalRes.compactBadgeSummary)")
-            }
+            parentWindow: window
         ) != nil {
             let finalCfg = cfg
             manager?.updateConfig? { $0 = finalCfg }
-            if showToast && !(finalCfg.lastSaveFormat == .png && finalCfg.smartPngCompression) {
+            if showToast {
                 ToastHUD.show("已保存")
             }
         }
@@ -407,50 +399,71 @@ private final class PinCanvasView: NSView {
         }
     }
 
+    private func pinMenuIcon(_ symbolName: String) -> NSImage? {
+        let cfg = NSImage.SymbolConfiguration(pointSize: 12.5, weight: .medium)
+        let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
+        img?.isTemplate = true
+        return img
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let owner else { return nil }
         let menu = NSMenu(title: "贴图")
-        let editItem = NSMenuItem(title: "标注 (Space)", action: #selector(onEdit), keyEquivalent: "")
+        let editItem = NSMenuItem(title: "标注", action: #selector(onEdit), keyEquivalent: " ")
+        editItem.keyEquivalentModifierMask = []
+        editItem.image = pinMenuIcon("paintbrush.pointed")
         editItem.target = self
         menu.addItem(editItem)
 
-        let ocrItem = NSMenuItem(title: "识字 (T)", action: #selector(onOCR), keyEquivalent: "")
+        let ocrItem = NSMenuItem(title: "识字", action: #selector(onOCR), keyEquivalent: "t")
+        ocrItem.keyEquivalentModifierMask = []
+        ocrItem.image = pinMenuIcon("text.viewfinder")
         ocrItem.target = self
         menu.addItem(ocrItem)
 
         let copyItem = NSMenuItem(title: "复制", action: #selector(onCopy), keyEquivalent: "c")
+        copyItem.image = pinMenuIcon("doc.on.doc")
         copyItem.target = self
         menu.addItem(copyItem)
 
         let saveItem = NSMenuItem(title: "保存", action: #selector(onSave), keyEquivalent: "s")
+        saveItem.image = pinMenuIcon("square.and.arrow.down")
         saveItem.target = self
         menu.addItem(saveItem)
 
-        let saveAsItem = NSMenuItem(title: "另存为…", action: #selector(onSaveAs), keyEquivalent: "S")
+        let saveAsItem = NSMenuItem(title: "另存为…", action: #selector(onSaveAs), keyEquivalent: "s")
+        saveAsItem.keyEquivalentModifierMask = [.command, .shift]
+        saveAsItem.image = pinMenuIcon("folder")
         saveAsItem.target = self
         menu.addItem(saveAsItem)
 
         menu.addItem(.separator())
 
         let borderItem = NSMenuItem(title: owner.showBorder ? "隐藏边框" : "显示边框", action: #selector(onToggleBorder), keyEquivalent: "")
+        borderItem.image = pinMenuIcon("rectangle.inset.filled")
         borderItem.target = self
         menu.addItem(borderItem)
 
         let throughItem = NSMenuItem(title: "鼠标穿透", action: #selector(onClickThrough), keyEquivalent: "")
+        throughItem.image = pinMenuIcon("cursorarrow.rays")
         throughItem.target = self
         menu.addItem(throughItem)
 
         let resetItem = NSMenuItem(title: "重置大小与透明度", action: #selector(onReset), keyEquivalent: "")
+        resetItem.image = pinMenuIcon("arrow.counterclockwise")
         resetItem.target = self
         menu.addItem(resetItem)
 
         menu.addItem(.separator())
 
-        let closeItem = NSMenuItem(title: "关闭 (Esc)", action: #selector(onClose), keyEquivalent: "")
+        let closeItem = NSMenuItem(title: "关闭", action: #selector(onClose), keyEquivalent: "\u{1b}")
+        closeItem.keyEquivalentModifierMask = []
+        closeItem.image = pinMenuIcon("xmark")
         closeItem.target = self
         menu.addItem(closeItem)
 
         let closeAllItem = NSMenuItem(title: "关闭全部", action: #selector(onCloseAll), keyEquivalent: "")
+        closeAllItem.image = pinMenuIcon("xmark.circle")
         closeAllItem.target = self
         menu.addItem(closeAllItem)
         return menu

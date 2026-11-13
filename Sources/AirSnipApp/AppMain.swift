@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import SwiftUI
 import AirSnipCore
 
@@ -154,33 +155,89 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         return img
     }
 
+    private func applyMenuShortcut(_ binding: HotkeyBinding, to item: NSMenuItem, baseTitle: String) {
+        if binding.isUnbound {
+            item.title = baseTitle
+            item.keyEquivalent = ""
+            item.keyEquivalentModifierMask = []
+            return
+        }
+        if let mb = binding.mouseButton {
+            item.title = "\(baseTitle)  (\(mb.displayName))"
+            item.keyEquivalent = ""
+            item.keyEquivalentModifierMask = []
+            return
+        }
+        guard let kc = binding.keyCode, let keyEq = Self.menuKeyEquivalent(for: kc) else {
+            item.title = "\(baseTitle)  (\(binding.displayString))"
+            item.keyEquivalent = ""
+            item.keyEquivalentModifierMask = []
+            return
+        }
+        var mask: NSEvent.ModifierFlags = []
+        if binding.modifiers.contains(.command) { mask.insert(.command) }
+        if binding.modifiers.contains(.option)  { mask.insert(.option) }
+        if binding.modifiers.contains(.control) { mask.insert(.control) }
+        if binding.modifiers.contains(.shift)   { mask.insert(.shift) }
+        item.title = baseTitle
+        item.keyEquivalent = keyEq
+        item.keyEquivalentModifierMask = mask
+    }
+
+    private static func menuKeyEquivalent(for keyCode: Int) -> String? {
+        switch keyCode {
+        case kVK_F1:  return String(UnicodeScalar(NSF1FunctionKey)!)
+        case kVK_F2:  return String(UnicodeScalar(NSF2FunctionKey)!)
+        case kVK_F3:  return String(UnicodeScalar(NSF3FunctionKey)!)
+        case kVK_F4:  return String(UnicodeScalar(NSF4FunctionKey)!)
+        case kVK_F5:  return String(UnicodeScalar(NSF5FunctionKey)!)
+        case kVK_F6:  return String(UnicodeScalar(NSF6FunctionKey)!)
+        case kVK_F7:  return String(UnicodeScalar(NSF7FunctionKey)!)
+        case kVK_F8:  return String(UnicodeScalar(NSF8FunctionKey)!)
+        case kVK_F9:  return String(UnicodeScalar(NSF9FunctionKey)!)
+        case kVK_F10: return String(UnicodeScalar(NSF10FunctionKey)!)
+        case kVK_F11: return String(UnicodeScalar(NSF11FunctionKey)!)
+        case kVK_F12: return String(UnicodeScalar(NSF12FunctionKey)!)
+        case kVK_Space:  return " "
+        case kVK_Return: return "\r"
+        case kVK_Escape: return "\u{1b}"
+        case kVK_Tab:    return "\t"
+        default:
+            let label = KeyCodeLabels.name(for: keyCode)
+            if label.count == 1 {
+                return label.lowercased()
+            }
+            return nil
+        }
+    }
+
     private func populateStatusMenu(_ menu: NSMenu) {
-        let capHint = config.hotkeys.screenshot.isUnbound ? "" : " (\(config.hotkeys.screenshot.displayString))"
-        let capItem = NSMenuItem(title: "截图\(capHint)", action: #selector(menuCapture), keyEquivalent: "")
+        let capItem = NSMenuItem(title: "截图", action: #selector(menuCapture), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.screenshot, to: capItem, baseTitle: "截图")
         capItem.image = menuIcon("viewfinder")
         capItem.target = self
         menu.addItem(capItem)
 
-        let winCapHint = config.hotkeys.windowCapture.isUnbound ? "" : " (\(config.hotkeys.windowCapture.displayString))"
-        let winCapItem = NSMenuItem(title: "窗体截图\(winCapHint)", action: #selector(menuDirectWindowCapture), keyEquivalent: "")
+        let winCapItem = NSMenuItem(title: "窗体截图", action: #selector(menuDirectWindowCapture), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.windowCapture, to: winCapItem, baseTitle: "窗体截图")
         winCapItem.image = menuIcon("macwindow")
         winCapItem.target = self
         menu.addItem(winCapItem)
 
-        let lsCapHint = config.hotkeys.longshotCapture.isUnbound ? "" : " (\(config.hotkeys.longshotCapture.displayString))"
-        let lsCapItem = NSMenuItem(title: "页面长截图\(lsCapHint)", action: #selector(menuDirectLongshotCapture), keyEquivalent: "")
+        let lsCapItem = NSMenuItem(title: "页面长截图", action: #selector(menuDirectLongshotCapture), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.longshotCapture, to: lsCapItem, baseTitle: "页面长截图")
         lsCapItem.image = menuIcon("arrow.up.and.down.text.horizontal")
         lsCapItem.target = self
         menu.addItem(lsCapItem)
 
-        let ocrCapHint = config.hotkeys.ocrCapture.isUnbound ? "" : " (\(config.hotkeys.ocrCapture.displayString))"
-        let ocrCapItem = NSMenuItem(title: "截图识字\(ocrCapHint)", action: #selector(menuDirectOCRCapture), keyEquivalent: "")
+        let ocrCapItem = NSMenuItem(title: "截图识字", action: #selector(menuDirectOCRCapture), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.ocrCapture, to: ocrCapItem, baseTitle: "截图识字")
         ocrCapItem.image = menuIcon("text.viewfinder")
         ocrCapItem.target = self
         menu.addItem(ocrCapItem)
 
-        let pinHint = config.hotkeys.pin.isUnbound ? "" : " (\(config.hotkeys.pin.displayString))"
-        let pinItem = NSMenuItem(title: "剪贴板贴图\(pinHint)", action: #selector(menuPinClipboard), keyEquivalent: "")
+        let pinItem = NSMenuItem(title: "剪贴板贴图", action: #selector(menuPinClipboard), keyEquivalent: "")
+        applyMenuShortcut(config.hotkeys.pin, to: pinItem, baseTitle: "剪贴板贴图")
         pinItem.image = menuIcon("pin")
         pinItem.target = self
         menu.addItem(pinItem)
@@ -205,7 +262,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
                 restoreItem.target = self
                 menu.addItem(restoreItem)
             }
-            let closePins = NSMenuItem(title: "关闭全部贴图 (\(pinManager.count))", action: #selector(menuCloseAllPins), keyEquivalent: "")
+            let closePins = NSMenuItem(title: "关闭全部贴图", action: #selector(menuCloseAllPins), keyEquivalent: "")
             closePins.image = menuIcon("xmark.circle")
             closePins.target = self
             menu.addItem(closePins)
@@ -218,7 +275,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        let quitItem = NSMenuItem(title: "退出 iSnip", action: #selector(menuQuit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "退出", action: #selector(menuQuit), keyEquivalent: "q")
         quitItem.image = menuIcon("power")
         quitItem.target = self
         menu.addItem(quitItem)
@@ -417,34 +474,26 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
         coordinator.onCompleteCopy = { [weak self] cgImg, scale in
             let currentCfg = self?.config
             let showToast = currentCfg?.showCompletionToast ?? true
-            OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: currentCfg) { res in
+            OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: currentCfg) { _ in
                 guard showToast else { return }
-                if res.savedRatioPercent >= 3 {
-                    ToastHUD.show("已复制 · \(res.compactBadgeSummary)")
-                } else {
-                    ToastHUD.show("已复制")
-                }
+                ToastHUD.show("已复制")
             }
         }
         coordinator.onCompleteSave = { [weak self] cgImg, scale, forceDialog, cfg in
             let showToast = cfg.showCompletionToast
             let cfgSaveURL = self?.configURL ?? AirSnipConfig.defaultConfigFileURL()
-            guard let savedURL = OutputService.saveImage(
+            guard OutputService.saveImage(
                 for: cgImg,
                 backingScale: scale,
                 config: &cfg,
                 forceDialog: forceDialog,
-                configSaveURL: cfgSaveURL,
-                onFinalCompressed: { fileURL, finalRes in
-                    guard showToast, finalRes.savedRatioPercent >= 3 else { return }
-                    ToastHUD.show("已保存 \(fileURL.lastPathComponent) · \(finalRes.compactBadgeSummary)")
-                }
-            ) else {
+                configSaveURL: cfgSaveURL
+            ) != nil else {
                 return false
             }
             self?.config = cfg
             if showToast {
-                ToastHUD.show("已保存 \(savedURL.lastPathComponent)")
+                ToastHUD.show("已保存")
             }
             return true
         }
@@ -500,13 +549,9 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             let currentCfg = self?.config
             let showToast = currentCfg?.showCompletionToast ?? true
             self?.activeLongshotSession = nil
-            OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: currentCfg) { res in
+            OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: currentCfg) { _ in
                 guard showToast else { return }
-                if res.savedRatioPercent >= 3 {
-                    ToastHUD.show("已复制 · \(res.compactBadgeSummary)")
-                } else {
-                    ToastHUD.show("已复制")
-                }
+                ToastHUD.show("已复制")
             }
         }
         ls.onFinishSave = { [weak self] cgImg, scale, forceDialog in
@@ -515,20 +560,16 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             OutputService.copyImageToClipboard(cgImg, backingScale: scale, config: self.config)
             var cfg = self.config
             let showToast = cfg.showCompletionToast
-            if let savedURL = OutputService.saveImage(
+            if OutputService.saveImage(
                 for: cgImg,
                 backingScale: scale,
                 config: &cfg,
                 forceDialog: forceDialog,
-                configSaveURL: self.configURL,
-                onFinalCompressed: { fileURL, finalRes in
-                    guard showToast, finalRes.savedRatioPercent >= 3 else { return }
-                    ToastHUD.show("已保存 \(fileURL.lastPathComponent) · \(finalRes.compactBadgeSummary)")
-                }
-            ) {
+                configSaveURL: self.configURL
+            ) != nil {
                 self.config = cfg
                 if showToast {
-                    ToastHUD.show("已保存 \(savedURL.lastPathComponent)")
+                    ToastHUD.show("已保存")
                 }
             }
         }

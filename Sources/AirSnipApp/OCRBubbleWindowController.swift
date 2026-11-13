@@ -255,15 +255,8 @@ private struct OCRBubbleCardView: View {
                     .foregroundStyle(Color.accentColor)
                 Text("文字识别")
                     .font(.system(size: 13, weight: .semibold))
-
-                if let cg = manager.sourceImage {
-                    Text("\(cg.width)×\(cg.height)")
-                        .font(.system(size: 10.5, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(Capsule().fill(Color.primary.opacity(0.07)))
-                }
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
 
                 Spacer(minLength: 4)
 
@@ -274,7 +267,7 @@ private struct OCRBubbleCardView: View {
                 }
                 .labelsHidden()
                 .controlSize(.small)
-                .frame(width: 84)
+                .frame(width: 88)
                 .help("识别语言")
 
                 Button {
@@ -381,6 +374,7 @@ private struct OCRBubbleCardView: View {
             )
 
             // Bottom bar
+            let copyDisabled = manager.text.isEmpty || manager.isRecognizing
             HStack(spacing: 12) {
                 Button {
                     manager.copyCurrentText()
@@ -389,25 +383,21 @@ private struct OCRBubbleCardView: View {
                         Image(systemName: manager.copiedFeedback ? "checkmark" : "doc.on.doc")
                             .font(.system(size: 11, weight: .semibold))
                         Text(manager.copiedFeedback ? "已复制" : "复制")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1)
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 5)
                     .background(
-                        RoundedRectangle(cornerRadius: 6)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(Color.accentColor)
                     )
                     .foregroundStyle(.white)
+                    .opacity(copyDisabled ? 0.45 : 1.0)
                 }
                 .buttonStyle(.plain)
-                .disabled(manager.text.isEmpty || manager.isRecognizing)
-
-                if !manager.text.isEmpty {
-                    let lineCount = manager.text.components(separatedBy: "\n").count
-                    Text("\(manager.text.count) 字 · \(lineCount) 行")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
+                .fixedSize(horizontal: true, vertical: false)
+                .disabled(copyDisabled)
 
                 Spacer(minLength: 4)
 
@@ -415,12 +405,7 @@ private struct OCRBubbleCardView: View {
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
                     .font(.system(size: 12))
-                    .help("合并段落内换行")
-
-                Toggle("自动复制", isOn: $manager.autoCopy)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .font(.system(size: 12))
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
         .padding(14)

@@ -654,18 +654,14 @@ public enum PngCompressionQualityPreset: String, Codable, CaseIterable, Sendable
 
     public var title: String {
         switch self {
-        case .visuallyLossless: return "视觉无损（默认）"
-        case .balanced: return "均衡（65–90）"
-        case .compact: return "高压缩（45–75）"
+        case .visuallyLossless: return "视觉无损"
+        case .balanced: return "均衡"
+        case .compact: return "高压缩"
         }
     }
 
     public var shortTitle: String {
-        switch self {
-        case .visuallyLossless: return "视觉无损"
-        case .balanced: return "均衡 65–90"
-        case .compact: return "高压缩 45–75"
-        }
+        title
     }
 
     public var qualityArgument: String? {

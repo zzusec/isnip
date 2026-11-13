@@ -1228,11 +1228,11 @@ final class OverlayCanvasView: NSView {
             }
 
             if windowPickerMode, cancelConfirmBanner == nil {
-                drawCancelConfirmBanner(in: ctx, message: "点击窗口截图（⌥切换阴影 · Tab切换叠放窗口） · Space 切换框选 · Esc 取消")
+                drawCancelConfirmBanner(in: ctx, message: "点击窗口截图 · Space 切换框选")
             } else if coordinator?.isDirectOCRCapture == true, cancelConfirmBanner == nil {
-                drawCancelConfirmBanner(in: ctx, message: "框选或点击窗口识字 · Esc 取消")
+                drawCancelConfirmBanner(in: ctx, message: "框选或点击窗口识字")
             } else if coordinator?.isDirectLongshotCapture == true, cancelConfirmBanner == nil {
-                drawCancelConfirmBanner(in: ctx, message: "框选滚动区域或点击窗口自动翻页长截图 · Esc 取消")
+                drawCancelConfirmBanner(in: ctx, message: "框选区域或点击窗口长截图")
             }
         }
 
@@ -2134,13 +2134,12 @@ final class OverlayCanvasView: NSView {
         case .none:
             return
         case .blur:
-            rowW = (106 * uis).rounded()
+            rowW = (104 * uis).rounded()
         case .stroke(let showFill):
             let leftW: CGFloat = (3 * 24 + 2 * 3 + (showFill ? 29 : 0)) * uis
             rowW = (14 * uis + leftW + (swatchesW > 0 ? (13 * uis + swatchesW) : 0)).rounded()
         case .text:
-            let textControlsW: CGFloat = 270 * uis
-            rowW = (textControlsW + (swatchesW > 0 ? (12 * uis + swatchesW + 6 * uis) : 0)).rounded()
+            rowW = (swatchesW > 0 ? (273 * uis + swatchesW) : (261 * uis)).rounded()
         }
 
         let targetCenter = anchorX ?? (mainBar.minX + min(mainBar.width * 0.5, rowW * 0.5))
@@ -2323,7 +2322,7 @@ final class OverlayCanvasView: NSView {
                 : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.09)
 
             // 1. Font family selector capsule
-            let fontBtnRect = CGRect(x: rect.minX + 6 * uis, y: rect.minY + 4 * uis, width: 112 * uis, height: height - 8 * uis)
+            let fontBtnRect = CGRect(x: rect.minX + 7 * uis, y: rect.minY + 4 * uis, width: 112 * uis, height: height - 8 * uis)
             let fp = CGPath(roundedRect: fontBtnRect, cornerWidth: 5 * uis, cornerHeight: 5 * uis, transform: nil)
             ctx.addPath(fp)
             ctx.setFillColor(hoveredItemID == "text.family" ? hoverCircle : capsuleFill)
@@ -2522,8 +2521,8 @@ final class OverlayCanvasView: NSView {
 
     private func drawColorPickerPopover(in ctx: CGContext) {
         guard var picker = colorPicker else { return }
-        let pw: CGFloat = 216
-        let ph: CGFloat = 210
+        let pw: CGFloat = 220
+        let ph: CGFloat = 202
         let anchorBar = (secondRowRect != .zero) ? secondRowRect : mainToolbarRect
         let swatchItem = toolbarHitItems.first(where: { $0.id == "swatch.\(picker.swatchIndex)" })?.rect ?? anchorBar
         var px = (swatchItem.midX - pw * 0.5).rounded()
@@ -2545,7 +2544,7 @@ final class OverlayCanvasView: NSView {
         let dark = isDarkTheme
         let bubblePath = makeCalloutBubblePath(
             rect: panelRect,
-            cornerRadius: 10.0,
+            cornerRadius: 10.5,
             arrowX: swatchItem.midX,
             arrowOnTop: placedBelow,
             arrowWidth: 12.0,
@@ -2566,7 +2565,7 @@ final class OverlayCanvasView: NSView {
         let liveColor = ColorPalette.hsvToRGB(h: picker.hue, s: picker.sat, v: picker.val)
 
         // 1. Smooth continuous 2D Saturation-Value gradient square
-        let svRect = CGRect(x: panelRect.minX + 12, y: panelRect.minY + 12, width: pw - 24, height: 100)
+        let svRect = CGRect(x: panelRect.minX + 14, y: panelRect.minY + 14, width: pw - 28, height: 100)
         picker.svRect = svRect
         let svClip = CGPath(roundedRect: svRect, cornerWidth: 6.5, cornerHeight: 6.5, transform: nil)
 
@@ -2604,9 +2603,11 @@ final class OverlayCanvasView: NSView {
         ctx.setLineWidth(0.8)
         ctx.strokePath()
 
-        // SV live-filled loupe ring
-        let knobX = svRect.minX + CGFloat(picker.sat) * svRect.width
-        let knobY = svRect.minY + CGFloat(1.0 - picker.val) * svRect.height
+        // SV live-filled loupe ring (kept cleanly inside svRect even at 100% corner saturation/brightness)
+        let rawKnobX = svRect.minX + CGFloat(picker.sat) * svRect.width
+        let rawKnobY = svRect.minY + CGFloat(1.0 - picker.val) * svRect.height
+        let knobX = max(svRect.minX + 5.5, min(svRect.maxX - 5.5, rawKnobX))
+        let knobY = max(svRect.minY + 5.5, min(svRect.maxY - 5.5, rawKnobY))
         let svKnobRect = CGRect(x: knobX - 5.5, y: knobY - 5.5, width: 11, height: 11)
         ctx.saveGState()
         ctx.setShadow(offset: CGSize(width: 0, height: 1), blur: 3, color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.42))
@@ -2654,30 +2655,9 @@ final class OverlayCanvasView: NSView {
         ctx.setFillColor(pureHue.cgColor)
         ctx.fillEllipse(in: hueThumb.insetBy(dx: 3.0, dy: 3.0))
 
-        // 3. Live HEX readout & swatch preview strip
-        let hexY = hueRect.maxY + 10
-        let previewDot = CGRect(x: svRect.minX, y: hexY + 1, width: 13, height: 13)
-        ctx.setFillColor(liveColor.cgColor)
-        ctx.fillEllipse(in: previewDot)
-        ctx.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.18))
-        ctx.setLineWidth(0.8)
-        ctx.strokeEllipse(in: previewDot)
-
-        let hexFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
-        let primaryText = dark ? NSColor(calibratedWhite: 0.92, alpha: 1) : NSColor(calibratedWhite: 0.18, alpha: 1)
-        let secondaryText = dark ? NSColor(calibratedWhite: 0.56, alpha: 1) : NSColor(calibratedWhite: 0.50, alpha: 1)
-        (liveColor.hexString as NSString).draw(
-            at: NSPoint(x: svRect.minX + 18, y: hexY),
-            withAttributes: [.font: hexFont, .foregroundColor: primaryText]
-        )
-        let tipStr: NSString = "预设"
-        let tipAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 9.5, weight: .regular), .foregroundColor: secondaryText]
-        let tipSz = tipStr.size(withAttributes: tipAttrs)
-        tipStr.draw(at: NSPoint(x: svRect.maxX - tipSz.width, y: hexY + 1), withAttributes: tipAttrs)
-
-        // 4. Circular quick swatches (2 rows x 6 cols)
+        // 3. Circular quick swatches (2 rows x 6 cols)
         var quickRects: [(CGRect, RGBAColor)] = []
-        let qTop = hexY + 21
+        let qTop = hueRect.maxY + 12
         let qSide: CGFloat = 18
         let qGapX = (svRect.width - qSide * 6) / 5.0
         for (idx, qc) in ColorPalette.quickColors.enumerated() {
@@ -2689,11 +2669,22 @@ final class OverlayCanvasView: NSView {
                 width: qSide,
                 height: qSide
             )
+            let qLum = (0.299 * Double(qc.r) + 0.587 * Double(qc.g) + 0.114 * Double(qc.b)) / 255.0
             ctx.setFillColor(qc.cgColor)
             ctx.fillEllipse(in: qr)
-            ctx.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.18))
+            ctx.setStrokeColor(
+                (dark && qLum < 0.22)
+                    ? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.28)
+                    : CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.18)
+            )
             ctx.setLineWidth(0.8)
             ctx.strokeEllipse(in: qr)
+            if qc == liveColor {
+                let ring = qr.insetBy(dx: -1.8, dy: -1.8)
+                ctx.setStrokeColor(CGColor(srgbRed: 0.09, green: 0.56, blue: 1.0, alpha: 0.92))
+                ctx.setLineWidth(1.3)
+                ctx.strokeEllipse(in: ring)
+            }
             quickRects.append((qr, qc))
         }
         picker.quickRects = quickRects
@@ -2738,17 +2729,26 @@ final class OverlayCanvasView: NSView {
     }
 
     private func drawCancelConfirmBanner(in ctx: CGContext, message: String) {
-        let font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
+        let font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor(calibratedWhite: 0.98, alpha: 1)]
         let sz = (message as NSString).size(withAttributes: attrs)
-        let w = sz.width + 26
-        let h = sz.height + 12
-        let rect = CGRect(x: bounds.midX - w * 0.5, y: 28, width: w, height: h)
+        let w = (sz.width + 28).rounded()
+        let h = (sz.height + 13).rounded()
+        let rect = CGRect(x: (bounds.midX - w * 0.5).rounded(), y: 32, width: w, height: h)
         let path = CGPath(roundedRect: rect, cornerWidth: h * 0.5, cornerHeight: h * 0.5, transform: nil)
-        ctx.addPath(path)
-        ctx.setFillColor(CGColor(srgbRed: 0.10, green: 0.11, blue: 0.13, alpha: 0.90))
-        ctx.fillPath()
-        (message as NSString).draw(at: NSPoint(x: rect.minX + 13, y: rect.minY + 6), withAttributes: attrs)
+        drawFrostedMaterial(
+            in: ctx,
+            path: path,
+            sampleRect: rect,
+            dark: true,
+            shadowOffsetY: 3.0,
+            shadowBlur: 12.0,
+            shadowAlpha: 0.28
+        )
+        (message as NSString).draw(
+            at: NSPoint(x: rect.minX + (w - sz.width) * 0.5, y: rect.minY + (h - sz.height) * 0.5),
+            withAttributes: attrs
+        )
     }
 
     private func drawSymbol(_ name: String, in rect: CGRect, pointSize: CGFloat, color: NSColor) {
