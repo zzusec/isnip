@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 import Carbon
 import CoreGraphics
 import ImageIO
@@ -918,5 +919,57 @@ final class AirSnipCoreTests: XCTestCase {
         XCTAssertEqual(out.height, fh + 210 + 256 + 256)
         // Verify intermediate seam rows (`y = 520`) do NOT have dark `(24,26,32)` rounded-corner notches at `x = 2`!
         XCTAssertGreaterThan(out.pixel(x: 2, y: 520).r, 200)
+    }
+
+    func testRetinaDPIMetadataPreservesOneToOneDisplayScaleAcrossAllFormatsAndSmartCompression() throws {
+        let pxW = 420
+        let pxH = 180
+        var rgba = [UInt8](repeating: 255, count: pxW * pxH * 4)
+        for y in 0..<pxH {
+            for x in 0..<pxW {
+                let i = (y * pxW + x) * 4
+                rgba[i] = UInt8((x * 3 + y) & 0xFF)
+                rgba[i + 1] = UInt8((120 + y) & 0xFF)
+                rgba[i + 2] = UInt8((200 - (x / 3)) & 0xFF)
+                rgba[i + 3] = (x < 8 && y < 8) ? 0 : 255
+            }
+        }
+        let buf = PixelBufferRGBA(width: pxW, height: pxH, rgba: rgba)
+        let cg = try XCTUnwrap(buf.makeCGImage())
+
+        func readDPIAndPointSize(_ data: Data) throws -> (dpiW: Double, dpiH: Double, ptSize: NSSize) {
+            let src = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+            let props = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any])
+            let dpiW = try XCTUnwrap(props[kCGImagePropertyDPIWidth] as? Double)
+            let dpiH = try XCTUnwrap(props[kCGImagePropertyDPIHeight] as? Double)
+            let nsImg = try XCTUnwrap(NSImage(data: data))
+            return (dpiW, dpiH, nsImg.size)
+        }
+
+        // 2x Retina (`144 DPI`, `pHYs = 5669` ppm): opening in Preview / NSImage MUST yield `210 x 90 pt` (1:1 Retina, never 2x enlarged!)
+        let rawPng2x = try ImageEncoder.encode(cg, format: .png, scale: 2.0, smartPngCompression: false)
+        let smartPng2x = try ImageEncoder.encodePNGWithReport(cg, scale: 2.0, smartCompression: true).data
+        let jpeg2x = try ImageEncoder.encode(cg, format: .jpeg, scale: 2.0)
+        let webp2x = try ImageEncoder.encode(cg, format: .webp, scale: 2.0)
+
+        for (label, encoded) in [("rawPNG@2x", rawPng2x), ("smartPNG@2x", smartPng2x), ("JPEG@2x", jpeg2x), ("WebP@2x", webp2x)] {
+            let info = try readDPIAndPointSize(encoded)
+            XCTAssertEqual(info.dpiW, 144.0, accuracy: 0.5, "\(label) dpiWidth mismatch")
+            XCTAssertEqual(info.dpiH, 144.0, accuracy: 0.5, "\(label) dpiHeight mismatch")
+            XCTAssertEqual(Double(info.ptSize.width), Double(pxW) / 2.0, accuracy: 0.5, "\(label) NSImage point width was enlarged!")
+            XCTAssertEqual(Double(info.ptSize.height), Double(pxH) / 2.0, accuracy: 0.5, "\(label) NSImage point height was enlarged!")
+        }
+
+        // Verify 2x WebP with VP8X+EXIF still preserves 100% lossless pixel & alpha roundtrip
+        let webpSrc = try XCTUnwrap(CGImageSourceCreateWithData(webp2x as CFData, nil))
+        let webpDecoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(webpSrc, 0, nil))
+        XCTAssertEqual(PixelBufferRGBA(cgImage: webpDecoded), PixelBufferRGBA(cgImage: cg))
+
+        // 1x non-Retina (`72 DPI`): logical point size equals pixel size (`420 x 180 pt`)
+        let rawPng1x = try ImageEncoder.encode(cg, format: .png, scale: 1.0, smartPngCompression: false)
+        let info1x = try readDPIAndPointSize(rawPng1x)
+        XCTAssertEqual(info1x.dpiW, 72.0, accuracy: 0.5)
+        XCTAssertEqual(Double(info1x.ptSize.width), Double(pxW), accuracy: 0.5)
+        XCTAssertEqual(Double(info1x.ptSize.height), Double(pxH), accuracy: 0.5)
     }
 }

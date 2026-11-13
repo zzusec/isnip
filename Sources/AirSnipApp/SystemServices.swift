@@ -398,13 +398,14 @@ public enum OutputService {
         config: AirSnipConfig? = nil,
         onCompressed: (@MainActor @Sendable (PngCompressionResult) -> Void)? = nil
     ) {
+        let effectiveScale = max(1.0, backingScale.isFinite ? backingScale : 2.0)
         let pointSize = NSSize(
-            width: CGFloat(Double(cgImage.width) / max(1.0, backingScale)),
-            height: CGFloat(Double(cgImage.height) / max(1.0, backingScale))
+            width: CGFloat(Double(cgImage.width) / effectiveScale),
+            height: CGFloat(Double(cgImage.height) / effectiveScale)
         )
         let nsImage = NSImage(cgImage: cgImage, size: pointSize)
 
-        guard let rawPngData = try? ImageEncoder.encode(cgImage, format: .png) else {
+        guard let rawPngData = try? ImageEncoder.encode(cgImage, format: .png, scale: effectiveScale) else {
             let pb = NSPasteboard.general
             pb.clearContents()
             pb.writeObjects([nsImage])
@@ -562,14 +563,16 @@ public enum OutputService {
         _ cgImage: CGImage,
         to url: URL,
         format: ExportImageFormat,
+        scale: Double,
         smartCompress: Bool,
         quality: PngCompressionQualityPreset,
         onFinalCompressed: (@MainActor @Sendable (URL, PngCompressionResult) -> Void)?
     ) throws {
+        let effectiveScale = max(1.0, scale.isFinite ? scale : 2.0)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         if format == .png && smartCompress {
             // Phase 0 (~16-80ms): write valid lossless raw PNG synchronously so the file is guaranteed on disk right away
-            let rawPngData = try ImageEncoder.encode(cgImage, format: .png)
+            let rawPngData = try ImageEncoder.encode(cgImage, format: .png, scale: effectiveScale)
             try rawPngData.write(to: url, options: .atomic)
             let savedURL = url
 
@@ -597,19 +600,21 @@ public enum OutputService {
                 }
             }
         } else {
-            let encoded = try ImageEncoder.encode(cgImage, format: format)
+            let encoded = try ImageEncoder.encode(cgImage, format: format, scale: effectiveScale)
             try encoded.write(to: url, options: .atomic)
         }
     }
 
     public static func saveImage(
         for cgImage: CGImage,
+        backingScale: Double? = nil,
         config: inout AirSnipConfig,
         forceDialog: Bool = false,
         configSaveURL: URL = AirSnipConfig.defaultConfigFileURL(),
         parentWindow: NSWindow? = nil,
         onFinalCompressed: (@MainActor @Sendable (URL, PngCompressionResult) -> Void)? = nil
     ) -> URL? {
+        let resolvedScale = max(1.0, backingScale ?? Double(NSScreen.main?.backingScaleFactor ?? 2.0))
         if !forceDialog && !config.askBeforeSave {
             let dir = defaultSaveDirectoryURL(for: config)
             let baseName = config.nameStyle.formatBaseName()
@@ -622,6 +627,7 @@ public enum OutputService {
                     cgImage,
                     to: dest,
                     format: fmt,
+                    scale: resolvedScale,
                     smartCompress: config.smartPngCompression,
                     quality: config.pngCompressionQuality,
                     onFinalCompressed: onFinalCompressed
@@ -633,6 +639,7 @@ public enum OutputService {
         }
         return presentSaveDialog(
             for: cgImage,
+            backingScale: resolvedScale,
             config: &config,
             configSaveURL: configSaveURL,
             parentWindow: parentWindow,
@@ -642,12 +649,14 @@ public enum OutputService {
 
     public static func presentSaveDialog(
         for cgImage: CGImage,
+        backingScale: Double? = nil,
         config: inout AirSnipConfig,
         configSaveURL: URL = AirSnipConfig.defaultConfigFileURL(),
         parentWindow: NSWindow? = nil,
         onFinalCompressed: (@MainActor @Sendable (URL, PngCompressionResult) -> Void)? = nil
     ) -> URL? {
         let _ = parentWindow
+        let resolvedScale = max(1.0, backingScale ?? Double(NSScreen.main?.backingScaleFactor ?? 2.0))
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSSavePanel()
         panel.title = "保存截图"
@@ -796,6 +805,7 @@ public enum OutputService {
                 cgImage,
                 to: url,
                 format: chosenFormat,
+                scale: resolvedScale,
                 smartCompress: chosenSmartCompress,
                 quality: chosenQuality,
                 onFinalCompressed: onFinalCompressed

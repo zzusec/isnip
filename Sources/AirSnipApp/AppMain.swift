@@ -427,11 +427,11 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             }
         }
         coordinator.onCompleteSave = { [weak self] cgImg, scale, forceDialog, cfg in
-            let _ = scale
             let showToast = cfg.showCompletionToast
             let cfgSaveURL = self?.configURL ?? AirSnipConfig.defaultConfigFileURL()
             guard let savedURL = OutputService.saveImage(
                 for: cgImg,
+                backingScale: scale,
                 config: &cfg,
                 forceDialog: forceDialog,
                 configSaveURL: cfgSaveURL,
@@ -517,6 +517,7 @@ public final class AirSnipAppController: NSObject, ObservableObject, NSMenuDeleg
             let showToast = cfg.showCompletionToast
             if let savedURL = OutputService.saveImage(
                 for: cgImg,
+                backingScale: scale,
                 config: &cfg,
                 forceDialog: forceDialog,
                 configSaveURL: self.configURL,

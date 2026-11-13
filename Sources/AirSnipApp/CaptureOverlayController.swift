@@ -4124,7 +4124,8 @@ final class OverlayCanvasView: NSView {
                 ) ?? baseCG
             }
             if applyWindowShadow && iso.includeShadow {
-                return AnnotationRenderer.applyWindowDropShadow(to: baked, scale: snapshot.backingScale) ?? baked
+                let shadowScale = iso.isWindowCapture ? iso.pixelScale : snapshot.backingScale
+                return AnnotationRenderer.applyWindowDropShadow(to: baked, scale: shadowScale) ?? baked
             }
             return baked
         }
@@ -4141,14 +4142,21 @@ final class OverlayCanvasView: NSView {
         )
     }
 
+    private var outputBackingScale: Double {
+        if let iso = isolatedWindowCapture, iso.isWindowCapture {
+            return iso.pixelScale
+        }
+        return snapshot.backingScale
+    }
+
     private func triggerCopyOutput() {
         guard let out = bakeCurrentSelectionOutput(applyWindowShadow: true) else { return }
-        coordinator?.finishWithCopy(image: out, scale: snapshot.backingScale)
+        coordinator?.finishWithCopy(image: out, scale: outputBackingScale)
     }
 
     private func triggerSaveOutput(forceDialog: Bool = false) {
         guard let out = bakeCurrentSelectionOutput(applyWindowShadow: true) else { return }
-        coordinator?.finishWithSave(image: out, scale: snapshot.backingScale, forceDialog: forceDialog)
+        coordinator?.finishWithSave(image: out, scale: outputBackingScale, forceDialog: forceDialog)
     }
 
     private func triggerPinOutput() {
@@ -4158,8 +4166,7 @@ final class OverlayCanvasView: NSView {
             x: sFrame.minX + CGFloat(sel.minX),
             y: sFrame.maxY - CGFloat(sel.maxY)
         )
-        let pinScale = isolatedWindowCapture?.pixelScale ?? snapshot.backingScale
-        coordinator?.finishWithPin(image: out, scale: pinScale, appKitOrigin: appKitOrigin)
+        coordinator?.finishWithPin(image: out, scale: outputBackingScale, appKitOrigin: appKitOrigin)
     }
 
     private func triggerOCR() {

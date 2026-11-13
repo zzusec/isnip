@@ -241,6 +241,7 @@ public final class PinWindowController: NSObject {
         let showToast = cfg.showCompletionToast
         if OutputService.saveImage(
             for: cgImage,
+            backingScale: backingScale,
             config: &cfg,
             forceDialog: forceDialog,
             parentWindow: window,

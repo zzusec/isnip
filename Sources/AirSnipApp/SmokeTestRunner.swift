@@ -88,13 +88,27 @@ public enum SmokeTestRunner {
                 return false
             }
 
-            print("[smoke] 3/7 验证 PNG / JPEG / 纯 Swift 无损 WebP 编码与 ImageIO 逐像素无损校验...")
-            let pngData = try ImageEncoder.encode(baked, format: .png)
-            let jpgData = try ImageEncoder.encode(baked, format: .jpeg)
-            let webpData = try ImageEncoder.encode(baked, format: .webp)
+            print("[smoke] 3/7 验证 PNG / JPEG / 纯 Swift 无损 WebP 编码、144 DPI Retina 1:1 物理比例与逐像素无损校验...")
+            let pngData = try ImageEncoder.encode(baked, format: .png, scale: 2.0)
+            let jpgData = try ImageEncoder.encode(baked, format: .jpeg, scale: 2.0)
+            let webpData = try ImageEncoder.encode(baked, format: .webp, scale: 2.0)
             guard !pngData.isEmpty, !jpgData.isEmpty, !webpData.isEmpty else {
                 fputs("FAIL: Image encoding produced empty output\n", stderr)
                 return false
+            }
+            for (label, encodedData) in [("PNG", pngData), ("JPEG", jpgData), ("WebP", webpData)] {
+                guard let src = CGImageSourceCreateWithData(encodedData as CFData, nil),
+                      let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+                      let dpiW = props[kCGImagePropertyDPIWidth] as? Double,
+                      let dpiH = props[kCGImagePropertyDPIHeight] as? Double,
+                      abs(dpiW - 144.0) < 0.5,
+                      abs(dpiH - 144.0) < 0.5,
+                      let nsImg = NSImage(data: encodedData),
+                      abs(Double(nsImg.size.width) - Double(baseW) / 2.0) < 0.5,
+                      abs(Double(nsImg.size.height) - Double(baseH) / 2.0) < 0.5 else {
+                    fputs("FAIL: \(label) 2x Retina DPI / 1:1 NSImage.size check failed\n", stderr)
+                    return false
+                }
             }
             guard let webpSrc = CGImageSourceCreateWithData(webpData as CFData, nil),
                   let webpDecoded = CGImageSourceCreateImageAtIndex(webpSrc, 0, nil),
@@ -105,9 +119,10 @@ public enum SmokeTestRunner {
                 return false
             }
 
-            print("[smoke] 4/7 验证内置 pngquant + oxipng 智能无损 PNG 压缩管线...")
+            print("[smoke] 4/7 验证内置 pngquant + oxipng 智能无损 PNG 压缩管线（保留 144 DPI）...")
             let compRes = try ImageEncoder.encodePNGWithReport(
                 baked,
+                scale: 2.0,
                 smartCompression: true,
                 quality: .visuallyLossless,
                 mode: .fullPipeline(oxipngMax: true)
@@ -116,6 +131,9 @@ public enum SmokeTestRunner {
                   compRes.usedOxipng,
                   compRes.compressedBytes < compRes.originalBytes,
                   let compSrc = CGImageSourceCreateWithData(compRes.data as CFData, nil),
+                  let compProps = CGImageSourceCopyPropertiesAtIndex(compSrc, 0, nil) as? [CFString: Any],
+                  let compDpiW = compProps[kCGImagePropertyDPIWidth] as? Double,
+                  abs(compDpiW - 144.0) < 0.5,
                   let compDecoded = CGImageSourceCreateImageAtIndex(compSrc, 0, nil),
                   compDecoded.width == baseW && compDecoded.height == baseH else {
                 fputs("FAIL: PngSmartCompressor pipeline failed (usedPngquant=\(compRes.usedPngquant), usedOxipng=\(compRes.usedOxipng), \(compRes.originalBytes) -> \(compRes.compressedBytes))\n", stderr)
@@ -248,9 +266,11 @@ public enum SmokeTestRunner {
                 defaultCfg.lastSaveDirectory = tempDir.path
                 var saveCfg = defaultCfg
                 saveCfg.smartPngCompression = false
-                guard let quickSaved1 = OutputService.saveImage(for: baked, config: &saveCfg, configSaveURL: cfgURL),
+                guard let quickSaved1 = OutputService.saveImage(for: baked, backingScale: snap.backingScale, config: &saveCfg, configSaveURL: cfgURL),
                       FileManager.default.fileExists(atPath: quickSaved1.path),
-                      let quickSaved2 = OutputService.saveImage(for: baked, config: &saveCfg, configSaveURL: cfgURL),
+                      let saved1Img = NSImage(contentsOf: quickSaved1),
+                      abs(Double(saved1Img.size.width) - Double(baseW) / snap.backingScale) < 0.5,
+                      let quickSaved2 = OutputService.saveImage(for: baked, backingScale: snap.backingScale, config: &saveCfg, configSaveURL: cfgURL),
                       FileManager.default.fileExists(atPath: quickSaved2.path),
                       quickSaved1 != quickSaved2 else {
                     return false

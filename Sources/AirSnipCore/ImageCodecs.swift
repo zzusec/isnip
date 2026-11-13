@@ -584,9 +584,51 @@ public enum PngSmartCompressor {
 }
 
 public enum ImageEncoder {
+    /// Computes physical DPI metadata (`72 * scale`, e.g. `144 DPI` / `5669 px/m` on 2x Retina) matching macOS `screencapture`
+    /// so macOS Preview, Finder Quick Look, Notes, Browsers, and `NSImage` open screenshots at exact 1:1 physical Retina scale
+    /// instead of magnifying 2x (`72 DPI`) with bilinear blur.
+    public static func dpiForBackingScale(_ scale: Double) -> Double {
+        let effectiveScale = (scale.isFinite && scale >= 1.0) ? scale : 1.0
+        return 72.0 * effectiveScale
+    }
+
+    private static func dpiProperties(for format: ExportImageFormat, scale: Double, jpegQuality: Double = 0.92) -> [CFString: Any] {
+        let dpi = dpiForBackingScale(scale)
+        let ppm = Int((dpi / 0.0254).rounded())
+        var props: [CFString: Any] = [
+            kCGImagePropertyDPIWidth: dpi,
+            kCGImagePropertyDPIHeight: dpi,
+            kCGImagePropertyTIFFDictionary: [
+                kCGImagePropertyTIFFXResolution: dpi,
+                kCGImagePropertyTIFFYResolution: dpi,
+                kCGImagePropertyTIFFResolutionUnit: 2,
+            ],
+        ]
+        switch format {
+        case .png:
+            props[kCGImagePropertyPNGDictionary] = [
+                kCGImagePropertyPNGXPixelsPerMeter: ppm,
+                kCGImagePropertyPNGYPixelsPerMeter: ppm,
+            ]
+        case .jpeg:
+            let roundedDPI = max(72, Int(dpi.rounded()))
+            props[kCGImageDestinationLossyCompressionQuality] = jpegQuality
+            props[kCGImageDestinationBackgroundColor] = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+            props[kCGImagePropertyJFIFDictionary] = [
+                kCGImagePropertyJFIFXDensity: roundedDPI,
+                kCGImagePropertyJFIFYDensity: roundedDPI,
+                kCGImagePropertyJFIFDensityUnit: 1,
+            ]
+        case .webp:
+            break
+        }
+        return props
+    }
+
     public static func encode(
         _ image: CGImage,
         format: ExportImageFormat,
+        scale: Double = 1.0,
         jpegQuality: Double = 0.92,
         smartPngCompression: Bool = false,
         pngQuality: PngCompressionQualityPreset = .visuallyLossless,
@@ -594,16 +636,14 @@ public enum ImageEncoder {
     ) throws -> Data {
         switch format {
         case .png:
-            let raw = try encodeWithImageIO(image, utType: UTType.png.identifier, properties: nil)
+            let props = dpiProperties(for: .png, scale: scale)
+            let raw = try encodeWithImageIO(image, utType: UTType.png.identifier, properties: props)
             if smartPngCompression {
                 return PngSmartCompressor.compress(raw, quality: pngQuality, mode: .fullPipeline(oxipngMax: oxipngMax)).data
             }
             return raw
         case .jpeg:
-            let props: [CFString: Any] = [
-                kCGImageDestinationLossyCompressionQuality: jpegQuality,
-                kCGImageDestinationBackgroundColor: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
-            ]
+            let props = dpiProperties(for: .jpeg, scale: scale, jpegQuality: jpegQuality)
             return try encodeWithImageIO(image, utType: UTType.jpeg.identifier, properties: props)
         case .webp:
             guard image.width <= 16384 && image.height <= 16384 else {
@@ -612,17 +652,19 @@ public enum ImageEncoder {
             guard let buf = PixelBufferRGBA(cgImage: image) else {
                 throw ImageEncodingError.invalidImage
             }
-            return VP8LLosslessEncoder.encode(buf)
+            return VP8LLosslessEncoder.encode(buf, scale: scale)
         }
     }
 
     public static func encodePNGWithReport(
         _ image: CGImage,
+        scale: Double = 1.0,
         smartCompression: Bool,
         quality: PngCompressionQualityPreset = .visuallyLossless,
         mode: PngSmartCompressor.Mode = .fullPipeline(oxipngMax: true)
     ) throws -> PngCompressionResult {
-        let raw = try encodeWithImageIO(image, utType: UTType.png.identifier, properties: nil)
+        let props = dpiProperties(for: .png, scale: scale)
+        let raw = try encodeWithImageIO(image, utType: UTType.png.identifier, properties: props)
         guard smartCompression else {
             return PngCompressionResult(
                 data: raw,
@@ -871,7 +913,33 @@ public enum VP8LLosslessEncoder {
         return (sym, extraBits, extraVal)
     }
 
-    public static func encode(_ buffer: PixelBufferRGBA) -> Data {
+    private static func makeMinimalDPIExifPayload(dpi: Double) -> [UInt8] {
+        // Minimal little-endian TIFF/EXIF IFD0 (66 bytes) storing XResolution (0x011A), YResolution (0x011B),
+        // and ResolutionUnit = 2 (inches, 0x0128) so macOS ImageIO / Preview / NSImage honor Retina DPI on WebP too.
+        let num = UInt32(max(72000, Int((dpi * 1000.0).rounded())))
+        let den: UInt32 = 1000
+        var bytes: [UInt8] = [
+            0x49, 0x49, 0x2A, 0x00, // "II*\0"
+            0x08, 0x00, 0x00, 0x00, // IFD0 offset = 8
+            0x03, 0x00,             // 3 IFD entries (offset 8 + 2 + 36 + 4 = 50)
+        ]
+        func appendU16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { bytes.append(contentsOf: $0) } }
+        func appendU32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { bytes.append(contentsOf: $0) } }
+        // Entry 1: XResolution (0x011A), RATIONAL (5), count 1, offset 50
+        appendU16(0x011A); appendU16(5); appendU32(1); appendU32(50)
+        // Entry 2: YResolution (0x011B), RATIONAL (5), count 1, offset 58
+        appendU16(0x011B); appendU16(5); appendU32(1); appendU32(58)
+        // Entry 3: ResolutionUnit (0x0128), SHORT (3), count 1, value = 2 (inches)
+        appendU16(0x0128); appendU16(3); appendU32(1); appendU16(2); appendU16(0)
+        // Next IFD offset = 0
+        appendU32(0)
+        // RATIONAL values at offsets 50 and 58
+        appendU32(num); appendU32(den)
+        appendU32(num); appendU32(den)
+        return bytes
+    }
+
+    public static func encode(_ buffer: PixelBufferRGBA, scale: Double = 1.0) -> Data {
         let width = buffer.width
         let height = buffer.height
         let rgba = buffer.rgba
@@ -1016,9 +1084,49 @@ public enum VP8LLosslessEncoder {
 
         let vp8l = bw.finish()
         let vp8lLen = UInt32(vp8l.count)
-        let paddedLen = vp8lLen + (vp8lLen & 1)
-        let riffLen = 4 + 8 + paddedLen
+        let paddedVp8lLen = vp8lLen + (vp8lLen & 1)
 
+        let dpi = ImageEncoder.dpiForBackingScale(scale)
+        if dpi > 72.05 {
+            let exif = makeMinimalDPIExifPayload(dpi: dpi)
+            let exifLen = UInt32(exif.count)
+            let paddedExifLen = exifLen + (exifLen & 1)
+            let vp8xFlags: UInt32 = 0x08 | (hasAlpha ? 0x10 : 0x00) // EXIF metadata + optional Alpha
+            let wMinus1 = UInt32(max(0, width - 1))
+            let hMinus1 = UInt32(max(0, height - 1))
+            // "WEBP" (4) + ("VP8X" 8 + 10) + ("VP8L" 8 + paddedVp8lLen) + ("EXIF" 8 + paddedExifLen)
+            let riffLen: UInt32 = 4 + 18 + (8 + paddedVp8lLen) + (8 + paddedExifLen)
+
+            var out = Data()
+            out.reserveCapacity(Int(8 + riffLen))
+            out.append(contentsOf: [0x52, 0x49, 0x46, 0x46]) // RIFF
+            withUnsafeBytes(of: riffLen.littleEndian) { out.append(contentsOf: $0) }
+            out.append(contentsOf: [0x57, 0x45, 0x42, 0x50]) // WEBP
+
+            out.append(contentsOf: [0x56, 0x50, 0x38, 0x58]) // VP8X
+            let vp8xLen: UInt32 = 10
+            withUnsafeBytes(of: vp8xLen.littleEndian) { out.append(contentsOf: $0) }
+            withUnsafeBytes(of: vp8xFlags.littleEndian) { out.append(contentsOf: $0) }
+            out.append(UInt8(truncatingIfNeeded: wMinus1))
+            out.append(UInt8(truncatingIfNeeded: wMinus1 >> 8))
+            out.append(UInt8(truncatingIfNeeded: wMinus1 >> 16))
+            out.append(UInt8(truncatingIfNeeded: hMinus1))
+            out.append(UInt8(truncatingIfNeeded: hMinus1 >> 8))
+            out.append(UInt8(truncatingIfNeeded: hMinus1 >> 16))
+
+            out.append(contentsOf: [0x56, 0x50, 0x38, 0x4C]) // VP8L
+            withUnsafeBytes(of: vp8lLen.littleEndian) { out.append(contentsOf: $0) }
+            out.append(contentsOf: vp8l)
+            if (vp8lLen & 1) == 1 { out.append(0) }
+
+            out.append(contentsOf: [0x45, 0x58, 0x49, 0x46]) // EXIF
+            withUnsafeBytes(of: exifLen.littleEndian) { out.append(contentsOf: $0) }
+            out.append(contentsOf: exif)
+            if (exifLen & 1) == 1 { out.append(0) }
+            return out
+        }
+
+        let riffLen = 4 + 8 + paddedVp8lLen
         var out = Data()
         out.reserveCapacity(Int(8 + riffLen))
         out.append(contentsOf: [0x52, 0x49, 0x46, 0x46])
